@@ -290,8 +290,11 @@ long long CppPreprocessor::evalExprAtom(const u8*& p, const u8* end,
         // Look up macro value
         const MacroDef* def = defines.get(ident);
         if (def && !def->value.isEmpty()) {
-            // Try to parse macro value as integer
-            return parseLong(def->value);
+            // Re-parse the macro value through our own evaluator
+            // which handles 0x hex, suffixes, etc.
+            const u8* vp = def->value.data();
+            const u8* ve = vp + def->value.size();
+            return evalExprAtom(vp, ve, defines);
         }
         return defines.has(ident) ? 1 : 0;
     }
