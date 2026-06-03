@@ -67,7 +67,7 @@ String Cache::cacheDir() {
     return dir;
 }
 
-static void mkdirRecursive(const String& path) {
+void Cache::mkdirRecursive(const String& path) {
     String current;
     const u8* d = path.data();
     for (usz i = 0; i < path.size(); ++i) {

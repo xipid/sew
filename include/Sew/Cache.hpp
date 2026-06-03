@@ -31,6 +31,9 @@ public:
     /// Get the cache directory path (~/.cache/sew/cache/).
     static String cacheDir();
 
+    /// Ensure directory exists recursively.
+    static void mkdirRecursive(const String& path);
+
     /// Read a cached entry. Returns empty string on miss.
     static String get(const String& key);
 
