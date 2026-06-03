@@ -29,6 +29,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <glob.h>
+#include <dirent.h>
 
 using namespace Sew;
 using namespace Sew::Languages;
@@ -203,6 +205,85 @@ static bool fileExists(const String& path) {
     return ::stat(path.c_str(), &st) == 0;
 }
 
+static void listFilesRecursive(const String& dirPath, Array<String>& outFiles) {
+    DIR* dir = ::opendir(dirPath.c_str());
+    if (!dir) return;
+
+    while (struct dirent* entry = ::readdir(dir)) {
+        String name = entry->d_name;
+        if (name == "." || name == "..") continue;
+
+        String fullPath = dirPath;
+        if (!fullPath.endsWith("/")) fullPath += "/";
+        fullPath += name;
+
+        struct stat st;
+        if (::stat(fullPath.c_str(), &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                listFilesRecursive(fullPath, outFiles);
+            } else if (S_ISREG(st.st_mode)) {
+                outFiles.push(fullPath);
+            }
+        }
+    }
+    ::closedir(dir);
+}
+
+static void expandGlob(const String& pattern, Array<String>& outFiles) {
+    glob_t g;
+    if (::glob(pattern.c_str(), 0, nullptr, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; ++i) {
+            struct stat st;
+            if (::stat(g.gl_pathv[i], &st) == 0 && S_ISREG(st.st_mode)) {
+                outFiles.push(g.gl_pathv[i]);
+            }
+        }
+        ::globfree(&g);
+    }
+}
+
+static bool matchSuffix(const String& file, const String& suffix) {
+    if (suffix.isEmpty() || suffix == "/*" || suffix == "/") return true;
+    String cleanSuffix = suffix;
+    if (cleanSuffix.startsWith("/*")) {
+        cleanSuffix = cleanSuffix.substring(2);
+    } else if (cleanSuffix.startsWith("/")) {
+        cleanSuffix = cleanSuffix.substring(1);
+    }
+    if (cleanSuffix.startsWith("*")) {
+        cleanSuffix = cleanSuffix.substring(1);
+    }
+    return file.endsWith(cleanSuffix);
+}
+
+static Array<String> expandInputPatterns(const Array<String>& patterns) {
+    Array<String> results;
+    for (usz i = 0; i < patterns.size(); ++i) {
+        String p = patterns[i];
+        long long doubleStarPos = p.indexOf("**");
+        if (doubleStarPos >= 0) {
+            String baseDir = p.substring(0, (usz)doubleStarPos);
+            String suffix = p.substring((usz)doubleStarPos + 2);
+            if (baseDir.isEmpty()) baseDir = ".";
+            if (baseDir.endsWith("/") && baseDir.length() > 1) {
+                baseDir = baseDir.substring(0, baseDir.length() - 1);
+            }
+            Array<String> allFiles;
+            listFilesRecursive(baseDir, allFiles);
+            for (usz j = 0; j < allFiles.size(); ++j) {
+                if (matchSuffix(allFiles[j], suffix)) {
+                    results.push(allFiles[j]);
+                }
+            }
+        } else if (p.indexOf('*') >= 0) {
+            expandGlob(p, results);
+        } else {
+            results.push(p);
+        }
+    }
+    return results;
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
@@ -262,7 +343,8 @@ int main(int argc, char** argv) {
     }
 
     // --- Collect source files ---
-    Array<String> sources = args.commands();
+    Array<String> patterns = args.commands();
+    Array<String> sources = expandInputPatterns(patterns);
 
     if (sources.size() == 0 && stdinLang.length() == 0) {
         printBanner();
@@ -401,6 +483,14 @@ int main(int argc, char** argv) {
     }
 
     // ─── Target Mode (Build) ────────────────────────────────────────────
+
+    if (target.length() == 0 && output.length() > 0) {
+        if (output.endsWith(".ts") || output.endsWith(".js")) {
+            target = "js";
+        } else if (output.endsWith(".py")) {
+            target = "py";
+        }
+    }
 
     if (target.length() == 0) {
         printError("No target specified. Use -t <target>");

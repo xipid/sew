@@ -5,6 +5,7 @@
 
 #include <Sew/JsTarget.hpp>
 #include <Execution/Process.hpp>
+#include <cstdio>
 
 namespace Sew {
 
@@ -103,14 +104,22 @@ LinkResult JsTarget::link(const LinkRequest& req) {
         }
 
         // Generate TS glue
-        String tsGlue = generateTsGlue("");
+        String tsGlue = req.tsGlue.isEmpty() ? generateTsGlue("") : req.tsGlue;
         String tsPath = req.outputPath;
         if (dotPos >= 0) {
             tsPath = req.outputPath.substring(0, (usz)dotPos);
         }
         tsPath += ".ts";
 
-        // Write glue file via the same output mechanism
+        // Write glue file
+        FILE* f = fopen(tsPath.c_str(), "w");
+        if (f) {
+            if (tsGlue.size() > 0) {
+                fwrite(tsGlue.data(), 1, tsGlue.size(), f);
+            }
+            fclose(f);
+        }
+
         result.outputPath = tsPath;
     }
 

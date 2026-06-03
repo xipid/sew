@@ -52,6 +52,10 @@ file(GLOB_RECURSE SEW_SOURCES
     "src/Sew/*.cpp"
     "src/Languages/*.cpp"
 )
+list(APPEND SEW_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Parser.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Generator.cpp"
+)
 
 # --- Main Target Definition ---
 add_library(SewLib STATIC ${SEW_SOURCES})

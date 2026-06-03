@@ -4,8 +4,35 @@
  */
 
 #include <Sew/Sew.hpp>
+#include <Sew/Parser.hpp>
+#include <Sew/Generator.hpp>
+#include <cstdio>
 
 namespace Sew {
+
+static String canonicalize(const String& path) {
+    Array<String> parts = path.split("/");
+    Array<String> clean;
+    for (usz i = 0; i < parts.size(); ++i) {
+        if (parts[i] == "." || parts[i].isEmpty()) continue;
+        if (parts[i] == "..") {
+            if (clean.size() > 0 && clean[clean.size() - 1] != "..") {
+                clean.pop();
+            } else {
+                clean.push("..");
+            }
+        } else {
+            clean.push(parts[i]);
+        }
+    }
+    String res;
+    if (path.startsWith("/")) res += "/";
+    for (usz i = 0; i < clean.size(); ++i) {
+        if (i > 0) res += "/";
+        res += clean[i];
+    }
+    return res;
+}
 
 void Engine::registerLanguage(Language* lang) {
     Array<String> exts = lang->extensions();
@@ -48,27 +75,29 @@ String Engine::detectLanguage(const String& path) const {
 
 String Engine::resolveImport(const ImportSpec& imp, const String& currentFile) {
     String spec = imp.specifier;
+    String res = spec;
 
     // If already absolute or relative, use as-is
     if (spec.startsWith("/") || spec.startsWith("./") || spec.startsWith("../")) {
-        return spec;
+        res = spec;
+    } else {
+        // Resolve relative to current file's directory
+        long long lastSlash = -1;
+        for (usz i = 0; i < currentFile.size(); ++i) {
+            if (currentFile.data()[i] == '/') lastSlash = (long long)i;
+        }
+
+        if (lastSlash >= 0) {
+            String dir = currentFile.substring(0, (usz)lastSlash);
+            res = dir + "/" + spec;
+        }
     }
 
-    // Resolve relative to current file's directory
-    long long lastSlash = -1;
-    for (usz i = 0; i < currentFile.size(); ++i) {
-        if (currentFile.data()[i] == '/') lastSlash = (long long)i;
-    }
-
-    if (lastSlash >= 0) {
-        String dir = currentFile.substring(0, (usz)lastSlash);
-        return dir + "/" + spec;
-    }
-
-    return spec;
+    return canonicalize(res);
 }
 
-void Engine::discoverFile(const String& path) {
+void Engine::discoverFile(const String& rawPath) {
+    String path = canonicalize(rawPath);
     if (_graph.hasNode(path)) return;
 
     String langName = detectLanguage(path);
@@ -82,6 +111,13 @@ void Engine::discoverFile(const String& path) {
     if (onRead) {
         content = onRead(path);
     }
+
+    if (path.endsWith("String.cpp")) {
+        fprintf(stderr, "=== DISCOVER STRING.CPP ===\n");
+        fprintf(stderr, "  Path: %s\n", path.c_str());
+        fprintf(stderr, "  Content size: %zu\n", content.size());
+    }
+
     if (content.isEmpty()) {
         // File might not exist (e.g. candidate sibling) — skip silently
         return;
@@ -200,6 +236,60 @@ void Engine::find() {
         }
     }
 
+    // Parse C++ headers to automatically generate WASM bindings and TS glue
+    CppHeaderParser parser;
+    Array<String> headerPaths;
+    for (usz i = 0; i < _graph.nodes.size(); ++i) {
+        SourceNode& node = _graph.nodes[i];
+        String ext;
+        long long lastDot = -1;
+        for (usz k = 0; k < node.path.size(); ++k) {
+            if (node.path.data()[k] == '.') lastDot = (long long)k;
+        }
+        if (lastDot >= 0) ext = node.path.substring((usz)lastDot);
+        if (node.language == "cpp" && (ext == ".h" || ext == ".hpp" || ext == ".hxx")) {
+            parser.parse(node.content);
+            headerPaths.push(node.path);
+        }
+    }
+
+    if (parser.classes.size() > 0 || parser.functions.size() > 0) {
+        // Generate C++ bridge
+        String bridgeCode = BindingGenerator::generateCppBridge(parser.classes, parser.functions, parser.namespaces, headerPaths);
+
+        // Add to graph
+        String bridgePath = "sew_bridge.cpp";
+        usz bridgeIdx = _graph.addNode(bridgePath, "cpp");
+        _graph.nodes[bridgeIdx].content = bridgeCode;
+
+        // Add dependency edges from sew_bridge.cpp to each header file in headerPaths
+        for (usz h = 0; h < headerPaths.size(); ++h) {
+            _graph.addEdge(bridgeIdx, _graph.indexOf(headerPaths[h]));
+        }
+
+        // Determine WASM name
+        String wasmName = "sew.wasm";
+        if (outputPath.length() > 0) {
+            long long slashPos = -1;
+            for (usz k = 0; k < outputPath.size(); ++k) {
+                if (outputPath.data()[k] == '/') slashPos = (long long)k;
+            }
+            String base = (slashPos >= 0) ? outputPath.substring((usz)slashPos + 1) : outputPath;
+            long long dotPos = -1;
+            for (usz k = 0; k < base.size(); ++k) {
+                if (base.data()[k] == '.') dotPos = (long long)k;
+            }
+            if (dotPos >= 0) {
+                wasmName = base.substring(0, (usz)dotPos) + ".wasm";
+            } else {
+                wasmName = base + ".wasm";
+            }
+        }
+
+        // Generate TS glue and store it
+        _generatedTsGlue = BindingGenerator::generateTsGlue(parser.classes, parser.functions, wasmName);
+    }
+
     // Compute build plan
     _plan = _graph.computeBuildPlan();
 
@@ -225,6 +315,11 @@ void Engine::build(const String& targetName) {
         _graph.nodes[i].form = target->formFor(_graph.nodes[i].language);
     }
 
+    fprintf(stderr, "=== GRAPH NODES ===\n");
+    for (usz i = 0; i < _graph.nodes.size(); ++i) {
+        fprintf(stderr, "  [%zu] %s (lang: %s, compiled: %s)\n", i, _graph.nodes[i].path.c_str(), _graph.nodes[i].language.c_str(), _graph.nodes[i].compiled ? "yes" : "no");
+    }
+
     Array<CompileResult> allResults;
     usz totalNodes = _graph.nodes.size();
     usz compiled = 0;
@@ -236,6 +331,7 @@ void Engine::build(const String& targetName) {
         for (usz j = 0; j < step.nodeIndices.size(); ++j) {
             usz nodeIdx = step.nodeIndices[j];
             SourceNode& node = _graph.nodes[nodeIdx];
+            fprintf(stderr, "Processing node [%zu]: %s\n", nodeIdx, node.path.c_str());
 
             if (node.compiled) continue;
 
@@ -262,7 +358,7 @@ void Engine::build(const String& targetName) {
             String cacheKey = Cache::computeKey(
                 node.content, targetName, {}, depHashes);
 
-            if (onCacheHas && onCacheHas(cacheKey)) {
+            if (node.path != "sew_bridge.cpp" && onCacheHas && onCacheHas(cacheKey)) {
                 if (onProgress) {
                     compiled++;
                     onProgress("Cached", compiled, totalNodes);
@@ -274,6 +370,15 @@ void Engine::build(const String& targetName) {
                 allResults.push(Xi::Move(res));
                 node.compiled = true;
                 continue;
+            }
+
+            // If this is the dynamically generated sew_bridge.cpp, write it to disk
+            if (node.path == "sew_bridge.cpp") {
+                FILE* f = fopen("sew_bridge.cpp", "w");
+                if (f) {
+                    fwrite(node.content.data(), 1, node.content.size(), f);
+                    fclose(f);
+                }
             }
 
             // Compile
@@ -305,7 +410,7 @@ void Engine::build(const String& targetName) {
             }
 
             // Cache the result
-            if (onCacheSet && res.outputPath.length() > 0) {
+            if (node.path != "sew_bridge.cpp" && onCacheSet && res.outputPath.length() > 0) {
                 onCacheSet(cacheKey, res.outputPath);
             }
 
@@ -326,6 +431,7 @@ void Engine::build(const String& targetName) {
     linkReq.units = Xi::Move(allResults);
     linkReq.outputPath = outputPath;
     linkReq.assetsDir = assetsDir;
+    linkReq.tsGlue = _generatedTsGlue;
 
     LinkResult linkResult = target->link(linkReq);
 
@@ -335,6 +441,10 @@ void Engine::build(const String& targetName) {
     }
 
     if (onFinish) onFinish(linkResult.outputPath);
+
+    // Clean up temporary sew_bridge files
+    remove("sew_bridge.cpp");
+    remove("sew_bridge.o");
 }
 
 void Engine::eval(const String& language) {

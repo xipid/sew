@@ -36,6 +36,17 @@ Array<ImportSpec> CppLanguage::parseImports(const String &source,
     imports.push(Xi::Move(spec));
   }
 
+  // Sibling source files for the header itself (e.g. String.cpp for String.hpp)
+  Array<String> selfSiblings = _preprocessor.findSiblingSourceFiles(filePath);
+  for (usz i = 0; i < selfSiblings.size(); ++i) {
+    ImportSpec spec;
+    spec.specifier = selfSiblings[i];
+    spec.fromFile = filePath;
+    spec.line = 0;
+    spec.isSystem = false;
+    imports.push(Xi::Move(spec));
+  }
+
   return imports;
 }
 

@@ -77,6 +77,7 @@ private:
     DepGraph _graph;
     BuildPlan _plan;
     EvalContext _evalCtx;
+    String _generatedTsGlue;
 
     /// Detect language by file extension.
     String detectLanguage(const String& path) const;

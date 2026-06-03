@@ -75,6 +75,9 @@ public:
     /// Process a single file.
     PreprocessorResult process(const String& source, const String& filePath);
 
+    /// Find sibling .cpp/.c/.o for a header.
+    Array<String> findSiblingSourceFiles(const String& headerPath);
+
 private:
     // --- Conditional stack ---
     struct CondFrame {
@@ -118,9 +121,6 @@ private:
     // --- Path resolution ---
     /// Resolve include path: relative to current file, include/→src/ rewrite.
     String resolveIncludePath(const String& specifier, const String& currentFile);
-
-    /// Find sibling .cpp/.c/.o for a header.
-    Array<String> findSiblingSourceFiles(const String& headerPath);
 
     /// Extract directory from a file path.
     String dirOf(const String& path) const;

@@ -18,6 +18,7 @@ struct LinkRequest {
     String outputPath;
     Array<String> flags;
     String assetsDir;
+    String tsGlue;
 };
 
 /**
