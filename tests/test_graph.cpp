@@ -168,7 +168,7 @@ static void test_independent() {
 
     BuildPlan plan = g.computeBuildPlan();
 
-    check("Independent: each node is its own step", plan.steps.size() == 3);
+    check("Independent: each node is its own step", plan.steps.size() == 1);
 }
 
 // ─── Test: Clear ─────────────────────────────────────────────────────────

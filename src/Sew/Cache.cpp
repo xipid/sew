@@ -13,26 +13,60 @@
 #include <fcntl.h>
 #include <cstdlib>
 #include <ctime>
+#include <cstdio>
+
+extern "C" {
+    void crypto_blake2b(unsigned char *hash, size_t hash_size, const unsigned char *msg, size_t msg_size);
+}
 
 namespace Sew {
 
 using namespace Xi;
 
-String Cache::hashContent(const String& content) {
-    // FNV-1a 64-bit hash → hex string
-    u64 h = 14695981039346656037ULL;
-    const u64 prime = 1099511628211ULL;
-    const u8* d = content.data();
-    for (usz i = 0; i < content.size(); ++i) {
-        h ^= (u64)d[i];
-        h *= prime;
+static String getClangVersion() {
+    static String s_version;
+    static bool s_loaded = false;
+    if (!s_loaded) {
+        FILE* f = popen("clang++ --version 2>/dev/null", "r");
+        if (f) {
+            char buf[256];
+            if (fgets(buf, sizeof(buf), f)) {
+                s_version = buf;
+            }
+            pclose(f);
+        }
+        s_loaded = true;
     }
+    return s_version;
+}
 
-    // Convert to 16-char hex string
+static String getSewSelfMetadata() {
+    static String s_meta;
+    static bool s_loaded = false;
+    if (!s_loaded) {
+        char path[1024];
+        ssize_t len = ::readlink("/proc/self/exe", path, sizeof(path) - 1);
+        if (len != -1) {
+            path[len] = '\0';
+            struct stat st;
+            if (::stat(path, &st) == 0) {
+                s_meta = String((long long)st.st_mtime) + ":" + String((long long)st.st_size);
+            }
+        }
+        s_loaded = true;
+    }
+    return s_meta;
+}
+
+String Cache::hashContent(const String& content) {
+    unsigned char hash[32];
+    crypto_blake2b(hash, 32, (const unsigned char*)content.data(), content.size());
+    
     String result;
     const char hex[] = "0123456789abcdef";
-    for (int i = 60; i >= 0; i -= 4) {
-        result.push(hex[(h >> i) & 0xf]);
+    for (int i = 0; i < 32; ++i) {
+        result.push(hex[(hash[i] >> 4) & 0xf]);
+        result.push(hex[hash[i] & 0xf]);
     }
     return result;
 }
@@ -43,11 +77,30 @@ String Cache::computeKey(
     const Array<String>& flags,
     const Array<String>& depHashes)
 {
-    // Combine all inputs into a single string and hash it
     String combined;
     combined += hashContent(sourceContent);
     combined += ":";
     combined += targetName;
+    combined += ":";
+    
+    // Hash environment variables
+    const char* env1 = ::getenv("SEW_EXTRA_FLAGS");
+    if (env1) combined += env1;
+    combined += ":";
+    const char* env2 = ::getenv("SEW_XIC_INCLUDE");
+    if (env2) combined += env2;
+    combined += ":";
+    const char* env3 = ::getenv("SEW_EXTRA_INCLUDE");
+    if (env3) combined += env3;
+    combined += ":";
+    
+    // Hash compiler version
+    combined += getClangVersion();
+    combined += ":";
+    
+    // Hash sew self metadata
+    combined += getSewSelfMetadata();
+    
     for (usz i = 0; i < flags.size(); ++i) {
         combined += ":";
         combined += flags[i];
@@ -67,7 +120,7 @@ String Cache::cacheDir() {
     return dir;
 }
 
-void Cache::mkdirRecursive(const String& path) {
+static void mkdirRecursive(const String& path) {
     String current;
     const u8* d = path.data();
     for (usz i = 0; i < path.size(); ++i) {
@@ -87,7 +140,6 @@ String Cache::get(const String& key) {
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return "";
 
-    // Get file size
     struct stat st;
     if (::fstat(fd, &st) != 0) { ::close(fd); return ""; }
 
@@ -101,22 +153,7 @@ String Cache::get(const String& key) {
         total += (usz)n;
     }
     ::close(fd);
-
-    // Set the actual size
-    // InlineArray uses push, so we need to push byte by byte for correctness
-    // Actually, we already allocated. Let's re-do this simply:
-    String result;
-    u8 buf[8192];
-    fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) return "";
-    for (;;) {
-        ssize_t n = ::read(fd, buf, sizeof(buf));
-        if (n <= 0) break;
-        for (ssize_t i = 0; i < n; ++i)
-            result.push(buf[i]);
-    }
-    ::close(fd);
-    return result;
+    return content;
 }
 
 void Cache::set(const String& key, const String& content) {

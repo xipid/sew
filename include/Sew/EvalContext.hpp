@@ -1,6 +1,9 @@
 /**
  * @file EvalContext.hpp
  * @brief Persistent evaluation context for REPL/eval mode.
+ *
+ * All language evaluation is performed via external processes
+ * (clang++, qjs/node, micropython/python3) using Execution::Process.
  */
 
 #pragma once
@@ -16,7 +19,7 @@ public:
     /// Initialize the runtime for a given language ("js", "py", "cpp").
     void init(const String& language);
 
-    /// Evaluate code and return output. Context persists between calls.
+    /// Evaluate code and return output. Each call is a fresh invocation.
     String eval(const String& code);
 
     /// Check if a context has been initialized.
@@ -27,11 +30,8 @@ public:
 
 private:
     String _language;
-    void* _jsRuntime = nullptr;     ///< QuickJS JSRuntime*
-    void* _jsContext = nullptr;     ///< QuickJS JSContext*
-    void* _mpState = nullptr;       ///< MicroPython state
-    void* _cppProcess = nullptr;    ///< Execution::Process* for C++ eval
     bool _initialized = false;
+    void* _cppProcess = nullptr;
 };
 
 } // namespace Sew

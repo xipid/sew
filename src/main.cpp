@@ -19,13 +19,13 @@
 #include <Languages/JS/JsLanguage.hpp>
 #include <Languages/Python/PyLanguage.hpp>
 #include <Terminal/Command.hpp>
+#include <Terminal/Format.hpp>
 #include <Xi/Primitives.hpp>
 #include <Xi/Time.hpp>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sys/ioctl.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -38,147 +38,26 @@ using namespace Terminal;
 using namespace Xi;
 using namespace Collection;
 
-// ─── ANSI Color Codes ───────────────────────────────────────────────────
-
-namespace Color {
-    static const char* Reset    = "\033[0m";
-    static const char* Bold     = "\033[1m";
-    static const char* Dim      = "\033[2m";
-    static const char* Italic   = "\033[3m";
-
-    // Brand colors
-    static const char* Cyan     = "\033[38;2;0;210;255m";
-    static const char* Green    = "\033[38;2;80;250;123m";
-    static const char* Yellow   = "\033[38;2;241;196;15m";
-    static const char* Red      = "\033[38;2;255;85;85m";
-    static const char* Magenta  = "\033[38;2;189;147;249m";
-    static const char* Orange   = "\033[38;2;255;165;0m";
-    static const char* Blue     = "\033[38;2;98;114;164m";
-    static const char* White    = "\033[38;2;248;248;242m";
-    static const char* Gray     = "\033[38;2;108;108;128m";
-
-    // Background
-    static const char* BgBar    = "\033[48;2;40;42;54m";
-    static const char* BgFill   = "\033[48;2;0;210;255m";
-}
-
-// ─── Terminal Utilities ─────────────────────────────────────────────────
-
-static int termWidth() {
-    struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
-        return w.ws_col;
-    return 80;
-}
-
-static void clearLine() {
-    fprintf(stderr, "\r\033[K");
-}
-
-// ─── Progress Bar ───────────────────────────────────────────────────────
-
-static void printProgress(const char* label, usz current, usz total) {
-    if (total == 0) return;
-    int width = termWidth();
-    int barWidth = width - 40;
-    if (barWidth < 10) barWidth = 10;
-    if (barWidth > 60) barWidth = 60;
-
-    float ratio = (float)current / (float)total;
-    int filled = (int)(ratio * barWidth);
-
-    clearLine();
-    fprintf(stderr, "  %s%s%s %s", Color::Cyan, Color::Bold, label, Color::Reset);
-
-    // Bar
-    fprintf(stderr, " %s", Color::BgBar);
-    for (int i = 0; i < barWidth; ++i) {
-        if (i < filled)
-            fprintf(stderr, "%s ", Color::BgFill);
-        else
-            fprintf(stderr, " ");
-    }
-    fprintf(stderr, "%s", Color::Reset);
-
-    // Percentage and count
-    int pct = (int)(ratio * 100.0f);
-    fprintf(stderr, " %s%3d%%%s %s(%zu/%zu)%s",
-            Color::White, pct, Color::Reset,
-            Color::Gray, current, total, Color::Reset);
-    fflush(stderr);
-}
-
-// ─── Logging ────────────────────────────────────────────────────────────
-
-static void printBanner() {
-    fprintf(stderr, "\n");
-    fprintf(stderr, "  %s%s╔═══════════════════════════════════╗%s\n",
-            Color::Cyan, Color::Bold, Color::Reset);
-    fprintf(stderr, "  %s%s║          ✦  S E W  ✦             ║%s\n",
-            Color::Cyan, Color::Bold, Color::Reset);
-    fprintf(stderr, "  %s%s║     Polyglot Build System         ║%s\n",
-            Color::Cyan, Color::Bold, Color::Reset);
-    fprintf(stderr, "  %s%s╚═══════════════════════════════════╝%s\n",
-            Color::Cyan, Color::Bold, Color::Reset);
-    fprintf(stderr, "\n");
-}
-
-static void printInfo(const String& msg) {
-    clearLine();
-    fprintf(stderr, "  %s%s●%s %s%s%s\n",
-            Color::Cyan, Color::Bold, Color::Reset,
-            Color::White, msg.c_str(), Color::Reset);
-}
-
-static void printWarn(const String& msg) {
-    clearLine();
-    fprintf(stderr, "  %s%s⚠%s %s%s%s\n",
-            Color::Yellow, Color::Bold, Color::Reset,
-            Color::Yellow, msg.c_str(), Color::Reset);
-}
-
-static void printError(const String& msg) {
-    clearLine();
-    fprintf(stderr, "  %s%s✗%s %s%s%s\n",
-            Color::Red, Color::Bold, Color::Reset,
-            Color::Red, msg.c_str(), Color::Reset);
-}
-
-static void printSuccess(const String& msg) {
-    clearLine();
-    fprintf(stderr, "  %s%s✓%s %s%s%s\n",
-            Color::Green, Color::Bold, Color::Reset,
-            Color::Green, msg.c_str(), Color::Reset);
-}
-
-static void printStep(const String& label, const String& detail) {
-    clearLine();
-    fprintf(stderr, "  %s%s▸%s %s%s%s %s%s%s\n",
-            Color::Magenta, Color::Bold, Color::Reset,
-            Color::White, Color::Bold, label.c_str(),
-            Color::Gray, detail.c_str(), Color::Reset);
-}
-
-static void printTiming(const char* label, i64 elapsedMs) {
-    if (elapsedMs < 1000) {
-        fprintf(stderr, "  %s%s⏱%s  %s%s%s took %s%s%lld ms%s\n",
-                Color::Blue, Color::Bold, Color::Reset,
-                Color::White, label, Color::Reset,
-                Color::Green, Color::Bold, (long long)elapsedMs, Color::Reset);
-    } else {
-        double secs = (double)elapsedMs / 1000.0;
-        fprintf(stderr, "  %s%s⏱%s  %s%s%s took %s%s%.2f s%s\n",
-                Color::Blue, Color::Bold, Color::Reset,
-                Color::White, label, Color::Reset,
-                Color::Green, Color::Bold, secs, Color::Reset);
-    }
-}
-
 // ─── File I/O ───────────────────────────────────────────────────────────
 
 static String readFile(const String& path) {
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return "";
+
+    struct stat st;
+    if (::fstat(fd, &st) == 0 && st.st_size > 0) {
+        String result;
+        result.allocate((usz)st.st_size);
+        usz total = 0;
+        while (total < (usz)st.st_size) {
+            ssize_t n = ::read(fd, (void*)(result.data() + total),
+                               (usz)st.st_size - total);
+            if (n <= 0) break;
+            total += (usz)n;
+        }
+        ::close(fd);
+        return result;
+    }
 
     String result;
     u8 buf[8192];
@@ -203,6 +82,39 @@ static void writeFile(const String& path, const String& content) {
 static bool fileExists(const String& path) {
     struct stat st;
     return ::stat(path.c_str(), &st) == 0;
+}
+
+static bool containsPath(const Array<String>& paths, const String& path) {
+    for (usz i = 0; i < paths.size(); ++i) {
+        if (paths[i] == path) return true;
+    }
+    return false;
+}
+
+static String executableDir() {
+    char path[1024];
+    ssize_t len = ::readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len <= 0) return "";
+    path[len] = '\0';
+    char* slash = ::strrchr(path, '/');
+    if (!slash) return "";
+    *slash = '\0';
+    return String(path);
+}
+
+static String parentDir(const String& path) {
+    long long slash = -1;
+    for (usz i = 0; i < path.size(); ++i) {
+        if (path.data()[i] == '/') slash = (long long)i;
+    }
+    if (slash <= 0) return "";
+    return path.substring(0, (usz)slash);
+}
+
+static String inferIncludeRoot(const String& path) {
+    long long includePos = path.indexOf("/include/");
+    if (includePos < 0) return "";
+    return path.substring(0, (usz)includePos);
 }
 
 static void listFilesRecursive(const String& dirPath, Array<String>& outFiles) {
@@ -240,6 +152,45 @@ static void expandGlob(const String& pattern, Array<String>& outFiles) {
         }
         ::globfree(&g);
     }
+}
+
+static void seedXylemCoreSources(const String& xylemRoot, Array<String>& sources) {
+    if (xylemRoot.isEmpty()) return;
+
+    const char* names[] = {
+        "Allocator", "BlobStore", "BlockDevice", "Cache", "Journal",
+        "QueryParser", "TableStore", "XBDiff", "Xylem", "Watcher", nullptr
+    };
+
+    for (int i = 0; names[i]; ++i) {
+        String src = xylemRoot + "/src/Xylem/";
+        src += names[i];
+        src += ".cpp";
+        if (fileExists(src) && !containsPath(sources, src)) {
+            sources.push(src);
+        }
+    }
+}
+
+static bool ensureWasiSdkInstalled() {
+    const char* home = ::getenv("HOME");
+    if (!home) return false;
+    String sdkDir = String(home) + "/.cache/sew/wasi-sdk";
+    String clangPath = sdkDir + "/bin/clang++";
+    struct stat st;
+    if (::stat(clangPath.c_str(), &st) == 0) {
+        return true;
+    }
+    fprintf(stderr, "WASI SDK toolchain not found. Downloading WASI SDK to %s...\n", sdkDir.c_str());
+    String mkdirCmd = "mkdir -p " + sdkDir;
+    ::system(mkdirCmd.c_str());
+    String downloadCmd = "curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz | tar -xz -C " + sdkDir + " --strip-components=1";
+    int ret = ::system(downloadCmd.c_str());
+    if (ret != 0) {
+        fprintf(stderr, "Failed to download/extract WASI SDK.\n");
+        return false;
+    }
+    return ::stat(clangPath.c_str(), &st) == 0;
 }
 
 static bool matchSuffix(const String& file, const String& suffix) {
@@ -303,6 +254,10 @@ int main(int argc, char** argv) {
         .description("Assets output directory")
         .string();
 
+    Array<String> includeDirs = args.option("--include -i")
+        .description("Additional include directory; may be repeated")
+        .value;
+
     String stdinLang = args.option("--stdin")
         .description("Language for stdin input / eval mode")
         .string();
@@ -310,30 +265,26 @@ int main(int argc, char** argv) {
     bool showHelp = args.flag("--help -h");
     bool showVersion = args.flag("--version -v");
     bool quiet = args.flag("--quiet -q");
-    bool noCache = args.flag("--no-cache");
+    bool noCache = false;
+    Command& cacheOpt = args.flag("--cache");
+    if (cacheOpt.active && cacheOpt.value.size() > 0 && cacheOpt.value[0] == "false") {
+        noCache = true;
+    }
+    // Also support querying --no-cache directly if the parser doesn't negate it in all versions
+    if (args.flag("--no-cache").active) {
+        noCache = true;
+    }
+
 
     // --- Help / Version ---
     if (showHelp) {
-        printBanner();
+        fprintf(stderr, "Sew v1\n\n");
         fprintf(stderr, "%s", args.help().c_str());
-        fprintf(stderr, "\n  %s%sTargets:%s\n", Color::White, Color::Bold, Color::Reset);
-        fprintf(stderr, "    %samd%s, %samd32%s, %sarm%s, %sarm32%s, "
-                "%srisc%s, %srisc32%s, %swasm%s,\n",
-                Color::Cyan, Color::Reset, Color::Cyan, Color::Reset,
-                Color::Cyan, Color::Reset, Color::Cyan, Color::Reset,
-                Color::Cyan, Color::Reset, Color::Cyan, Color::Reset,
-                Color::Cyan, Color::Reset);
-        fprintf(stderr, "    %sxtensa%s, %sxtensa32%s, %sbpf%s, "
-                "%sjs%s, %spy%s\n\n",
-                Color::Cyan, Color::Reset, Color::Cyan, Color::Reset,
-                Color::Cyan, Color::Reset,
-                Color::Cyan, Color::Reset, Color::Cyan, Color::Reset);
-
-        fprintf(stderr, "  %s%sExamples:%s\n", Color::White, Color::Bold, Color::Reset);
-        fprintf(stderr, "    %ssew main.cpp -t amd -o main%s\n", Color::Gray, Color::Reset);
-        fprintf(stderr, "    %ssew app.cpp render.js -t js -o app%s\n", Color::Gray, Color::Reset);
-        fprintf(stderr, "    %ssew --stdin js%s  %s(eval mode)%s\n\n",
-                Color::Gray, Color::Reset, Color::Dim, Color::Reset);
+        fprintf(stderr, "\nTargets: amd, amd32, arm, arm32, risc, risc32, wasm, xtensa, xtensa32, bpf, js, py\n");
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  sew main.cpp -t amd -o main\n");
+        fprintf(stderr, "  sew app.cpp render.js -t js -o app\n");
+        fprintf(stderr, "  sew --stdin js  (eval mode)\n");
         return 0;
     }
 
@@ -346,14 +297,49 @@ int main(int argc, char** argv) {
     Array<String> patterns = args.commands();
     Array<String> sources = expandInputPatterns(patterns);
 
+    if (target == "js") {
+        String xylemRoot;
+        for (usz i = 0; i < sources.size(); ++i) {
+            xylemRoot = inferIncludeRoot(sources[i]);
+            if (!xylemRoot.isEmpty()) {
+                break;
+            }
+        }
+        if (!xylemRoot.isEmpty()) {
+            String xylemInclude = xylemRoot + "/include";
+            if (!containsPath(includeDirs, xylemInclude)) {
+                includeDirs.push(xylemInclude);
+            }
+            String watcherCpp = xylemRoot + "/src/Xylem/Watcher.cpp";
+            if (fileExists(watcherCpp) && !containsPath(sources, watcherCpp)) {
+                sources.push(watcherCpp);
+            }
+        }
+
+        String sewRoot = parentDir(executableDir());
+        if (!sewRoot.isEmpty()) {
+            String reflectionCpp = sewRoot + "/src/Reflection/Reflection.cpp";
+            if (fileExists(reflectionCpp) && !containsPath(sources, reflectionCpp)) {
+                sources.push(reflectionCpp);
+            }
+        }
+
+        seedXylemCoreSources(xylemRoot, sources);
+    }
+
     if (sources.size() == 0 && stdinLang.length() == 0) {
-        printBanner();
-        fprintf(stderr, "  %sNo input files. Use %s--help%s%s for usage.%s\n\n",
-                Color::Yellow, Color::Bold, Color::Reset, Color::Yellow, Color::Reset);
+        fprintf(stderr, "Sew v1\n\n");
+        fprintf(stderr, "No input files. Use --help for usage.\n");
         return 1;
     }
 
-    if (!quiet) printBanner();
+    if (target == "js" || target == "wasm") {
+        if (!ensureWasiSdkInstalled()) {
+            return 1;
+        }
+    }
+
+    if (!quiet) fprintf(stderr, "Sew v1\n\n");
 
     i64 startTime = millis();
 
@@ -363,6 +349,73 @@ int main(int argc, char** argv) {
 
     // Register languages
     CppLanguage cppLang;
+    
+    // Configure C++ preprocessor include paths
+    cppLang.preprocessor().includePaths.push("include");
+    for (usz i = 0; i < includeDirs.size(); ++i) {
+        cppLang.preprocessor().includePaths.push(includeDirs[i]);
+        sew.includePaths.push(includeDirs[i]);
+    }
+
+    const char* xicPath = getenv("SEW_XIC_INCLUDE");
+    if (xicPath) {
+        cppLang.preprocessor().includePaths.push(xicPath);
+        sew.includePaths.push(xicPath);
+    } else {
+        const char* tryPaths[] = {
+            "../xic/include",
+            "/home/xi/Repo/xic/include",
+            nullptr
+        };
+        for (int i = 0; tryPaths[i]; ++i) {
+            struct stat st;
+            if (stat(tryPaths[i], &st) == 0) {
+                cppLang.preprocessor().includePaths.push(tryPaths[i]);
+                sew.includePaths.push(tryPaths[i]);
+                break;
+            }
+        }
+    }
+
+    const char* rhoPath = getenv("SEW_RHO_INCLUDE");
+    if (rhoPath) {
+        cppLang.preprocessor().includePaths.push(rhoPath);
+        sew.includePaths.push(rhoPath);
+    } else {
+        const char* tryRhoPaths[] = {
+            "../rho/include",
+            "/home/xi/Repo/rho/include",
+            nullptr
+        };
+        for (int i = 0; tryRhoPaths[i]; ++i) {
+            struct stat st;
+            if (stat(tryRhoPaths[i], &st) == 0) {
+                cppLang.preprocessor().includePaths.push(tryRhoPaths[i]);
+                sew.includePaths.push(tryRhoPaths[i]);
+                break;
+            }
+        }
+    }
+
+    const char* extraInclude = getenv("SEW_EXTRA_INCLUDE");
+    if (extraInclude) {
+        String extraStr(extraInclude);
+        String current;
+        for (usz i = 0; i < extraStr.length(); ++i) {
+            if (extraStr.data()[i] == ':') {
+                if (!current.isEmpty()) {
+                    cppLang.preprocessor().includePaths.push(current);
+                    current.clear();
+                }
+            } else {
+                current.push(extraStr.data()[i]);
+            }
+        }
+        if (!current.isEmpty()) {
+            cppLang.preprocessor().includePaths.push(current);
+        }
+    }
+
     JsLanguage jsLang;
     PyLanguage pyLang;
     sew.registerLanguage(&cppLang);
@@ -386,7 +439,7 @@ int main(int argc, char** argv) {
     NativeTarget tXtensa("xtensa", mkAliases(), "xtensa-esp32s3-elf");
     NativeTarget tXtensa32("xtensa32", mkAliases(), "xtensa-esp32-elf");
     NativeTarget tBpf("bpf", mkAliases("ebpf"), "bpf-unknown-none");
-    NativeTarget tWasm("wasm", mkAliases("wasm32"), "wasm32-unknown-wasi");
+    NativeTarget tWasm("wasm", mkAliases("wasm32"), "wasm32-unknown-wasip1");
     JsTarget tJs;
     PyTarget tPy;
 
@@ -432,17 +485,13 @@ int main(int argc, char** argv) {
     };
 
     sew.onFinish = [&quiet](String outPath) {
-        if (!quiet) printSuccess("Output: " + outPath);
+        if (!quiet) Success("Output: " + outPath);
     };
 
-    // Progress and logging callbacks
     if (!quiet) {
-        sew.onProgress = [](String msg, usz current, usz total) {
-            printProgress(msg.c_str(), current, total);
-        };
-        sew.onInfo = [](String msg) { printInfo(msg); };
-        sew.onWarn = [](String msg) { printWarn(msg); };
-        sew.onError = [](String msg) { printError(msg); };
+        sew.onInfo = [](String msg) { Info(msg); };
+        sew.onWarn = [](String msg) { Warn(msg); };
+        sew.onError = [](String msg) { Error(msg); };
     }
 
     sew.assetsDir = assets;
@@ -451,11 +500,11 @@ int main(int argc, char** argv) {
     // ─── Run Mode (Eval) ────────────────────────────────────────────────
 
     if (stdinLang.length() > 0 && target.length() == 0) {
-        if (!quiet) printStep("Eval Mode", stdinLang);
+        if (!quiet) Info("Eval Mode: " + stdinLang);
 
         sew.eval(stdinLang);
 
-        // Read from stdin and eval
+        // Read from stdin
         String code;
         u8 buf[4096];
         for (;;) {
@@ -466,17 +515,15 @@ int main(int argc, char** argv) {
         }
 
         if (code.length() > 0) {
-            // Add as input and eval...
-            for (usz i = 0; i < sources.size(); ++i) {
-                sew.input(sources[i], readFile(sources[i]));
+            String result = sew.evalCode(code);
+            if (result.length() > 0) {
+                ::write(STDOUT_FILENO, result.data(), result.size());
             }
         }
 
         i64 elapsed = millis() - startTime;
         if (!quiet) {
-            fprintf(stderr, "\n");
-            printTiming("Eval", elapsed);
-            fprintf(stderr, "\n");
+            fprintf(stderr, "Eval took %lld ms\n", (long long)elapsed);
         }
 
         goto cleanup;
@@ -493,7 +540,7 @@ int main(int argc, char** argv) {
     }
 
     if (target.length() == 0) {
-        printError("No target specified. Use -t <target>");
+        Error("No target specified. Use -t <target>");
         return 1;
     }
 
@@ -513,15 +560,15 @@ int main(int argc, char** argv) {
     }
 
     if (!quiet) {
-        printStep("Target", target);
-        printStep("Output", output);
+        Info("Target: " + target);
+        Info("Output: " + output);
 
         String sourceList;
         for (usz i = 0; i < sources.size(); ++i) {
             if (i > 0) sourceList += ", ";
             sourceList += sources[i];
         }
-        printStep("Sources", sourceList);
+        Info("Sources: " + sourceList);
         fprintf(stderr, "\n");
     }
 
@@ -531,7 +578,7 @@ int main(int argc, char** argv) {
         for (usz i = 0; i < sources.size(); ++i) {
             String content = readFile(sources[i]);
             if (content.isEmpty()) {
-                printError("Cannot read: " + sources[i]);
+                Error("Cannot read: " + sources[i]);
                 return 1;
             }
             sew.input(sources[i], content);
@@ -541,26 +588,36 @@ int main(int argc, char** argv) {
         sew.find();
         i64 findElapsed = millis() - findStart;
         if (!quiet) {
-            clearLine();
-            printTiming("Discovery", findElapsed);
+            fprintf(stderr, "Discovery took %lld ms\n", (long long)findElapsed);
         }
 
         // Build
+        Progress progress;
+        usz progressTask = 0;
+        if (!quiet) {
+            progressTask = progress.addLinearTask((u64)sew.nodeCount(), "it", "Build");
+            sew.onProgress = [&progress, progressTask](String msg, usz current, usz total) {
+                if (progress.tasks.size() == 0) return;
+                progress.message = msg;
+                progress.updateLinearTask(progressTask, current, msg);
+                progress.update();
+                (void)total;
+            };
+        }
         i64 buildStart = millis();
-        sew.build(target);
+        bool ok = sew.build(target);
         i64 buildElapsed = millis() - buildStart;
         if (!quiet) {
-            clearLine();
-            printTiming("Build", buildElapsed);
+            progress.destroy();
+            fprintf(stderr, "Build took %lld ms\n", (long long)buildElapsed);
         }
+        if (!ok) return 1;
     }
 
     {
         i64 totalElapsed = millis() - startTime;
         if (!quiet) {
-            fprintf(stderr, "\n");
-            printTiming("Total", totalElapsed);
-            fprintf(stderr, "\n");
+            fprintf(stderr, "Total took %lld ms\n", (long long)totalElapsed);
         }
     }
 
@@ -569,11 +626,7 @@ cleanup:
     if (!noCache) {
         usz cleaned = Cache::cleanOld(30);
         if (cleaned > 0 && !quiet) {
-            String cleanMsg = "Cleaned ";
-            cleanMsg += String((long long)cleaned);
-            cleanMsg += " stale cache entries";
-            fprintf(stderr, "  %s%s%s%s\n\n",
-                    Color::Gray, Color::Dim, cleanMsg.c_str(), Color::Reset);
+            fprintf(stderr, "Cleaned %llu stale cache entries\n", (unsigned long long)cleaned);
         }
     }
 

@@ -119,6 +119,9 @@ private:
     String readIdentifier(const u8*& p, const u8* end) const;
 
     // --- Path resolution ---
+    /// Get include search paths.
+    Array<String> getSearchPaths(const String& currentFile);
+
     /// Resolve include path: relative to current file, include/→src/ rewrite.
     String resolveIncludePath(const String& specifier, const String& currentFile);
 

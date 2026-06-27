@@ -55,7 +55,53 @@ file(GLOB_RECURSE SEW_SOURCES
 list(APPEND SEW_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Parser.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Generator.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Reflection/Reflection.cpp"
 )
+
+# --- QuickJS via FetchContent ---
+include(FetchContent)
+set(QUICKJS_LOCAL_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/quickjs_src-src")
+if(EXISTS "${QUICKJS_LOCAL_SOURCE_DIR}/quickjs.c")
+    message(STATUS "Using local QuickJS source at ${QUICKJS_LOCAL_SOURCE_DIR}")
+    FetchContent_Declare(
+        quickjs_src
+        SOURCE_DIR "${QUICKJS_LOCAL_SOURCE_DIR}"
+    )
+else()
+    FetchContent_Declare(
+        quickjs_src
+        GIT_REPOSITORY https://github.com/bellard/quickjs.git
+        GIT_TAG master
+    )
+endif()
+FetchContent_GetProperties(quickjs_src)
+if(NOT quickjs_src_POPULATED)
+    FetchContent_Populate(quickjs_src)
+endif()
+
+add_library(quickjs STATIC
+    "${quickjs_src_SOURCE_DIR}/quickjs.c"
+    "${quickjs_src_SOURCE_DIR}/libregexp.c"
+    "${quickjs_src_SOURCE_DIR}/libunicode.c"
+    "${quickjs_src_SOURCE_DIR}/cutils.c"
+    "${quickjs_src_SOURCE_DIR}/quickjs-libc.c"
+    "${quickjs_src_SOURCE_DIR}/dtoa.c"
+)
+target_compile_definitions(quickjs PRIVATE
+    _GNU_SOURCE
+    CONFIG_VERSION="2026-06-04"
+)
+target_include_directories(quickjs PUBLIC
+    "${quickjs_src_SOURCE_DIR}"
+)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(quickjs PRIVATE
+        -Wno-sign-compare
+        -Wno-missing-field-initializers
+        -Wno-unused-parameter
+        -Wno-char-subscripts
+    )
+endif()
 
 # --- Main Target Definition ---
 add_library(SewLib STATIC ${SEW_SOURCES})
@@ -64,10 +110,12 @@ add_library(SewLib STATIC ${SEW_SOURCES})
 target_include_directories(SewLib PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+    $<BUILD_INTERFACE:${quickjs_src_SOURCE_DIR}>
 )
 
-# Link against Xi
-target_link_libraries(SewLib PUBLIC Xi::Xi)
+# Link against Xi and quickjs
+target_link_libraries(SewLib PUBLIC Xi::Xi quickjs)
+
 
 # --- Test Discovery ---
 file(GLOB TEST_SOURCES "tests/*.cpp")
@@ -78,7 +126,22 @@ foreach(TEST_SRC ${TEST_SOURCES})
     set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endforeach()
 
+# --- Hot-reloading test (separate: lives in tests/hotreloading/, needs dl) ---
+add_executable(test_hotreloading tests/hotreloading/main.cpp)
+target_link_libraries(test_hotreloading PRIVATE SewLib ${CMAKE_DL_LIBS})
+# -export-dynamic: symbols from this binary are visible to dlopen()'d .so files,
+# so the modules can resolve SewLib functions without being linked against SewLib.
+target_link_options(test_hotreloading PRIVATE -Wl,-export-dynamic)
+set_target_properties(test_hotreloading PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+
 # --- CLI Tool ---
 add_executable(sew src/main.cpp)
 target_link_libraries(sew PRIVATE SewLib)
 set_target_properties(sew PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+if(EXISTS "/home/xi/.gemini/antigravity/brain/8f46d962-8582-4335-9d80-910ea9fb462b/scratch/debug_parser.cpp")
+    add_executable(debug_parser /home/xi/.gemini/antigravity/brain/8f46d962-8582-4335-9d80-910ea9fb462b/scratch/debug_parser.cpp)
+    target_link_libraries(debug_parser PRIVATE SewLib)
+    set_target_properties(debug_parser PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endif()

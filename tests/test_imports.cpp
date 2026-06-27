@@ -153,7 +153,7 @@ static void test_cache_hash() {
 
     check("Cache: same content → same hash", ha == hb);
     check("Cache: different content → different hash", ha != hc);
-    check("Cache: hash is 16 hex chars", ha.size() == 16);
+    check("Cache: hash is 64 hex chars", ha.size() == 64);
 }
 
 static void test_cache_key_composite() {

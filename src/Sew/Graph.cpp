@@ -162,11 +162,44 @@ BuildPlan DepGraph::computeBuildPlan() const {
         Xi::Swap(topoOrder[i], topoOrder[topoOrder.size() - 1 - i]);
     }
 
-    // Each SCC becomes a BuildStep
+    // Group SCCs into BuildSteps by their dependency levels to enable parallel compilation
+    Array<usz> levels;
+    levels.allocate(sccCount);
+    for (usz i = 0; i < sccCount; ++i) levels[i] = 0;
+
+    usz maxLevel = 0;
     for (usz i = 0; i < topoOrder.size(); ++i) {
-        BuildStep step;
-        step.nodeIndices = sccs[topoOrder[i]];
-        plan.steps.push(Xi::Move(step));
+        usz scc = topoOrder[i];
+        usz myLevel = 0;
+        for (usz d = 0; d < sccDeps[scc].size(); ++d) {
+            usz dep = sccDeps[scc][d];
+            if (levels[dep] + 1 > myLevel) {
+                myLevel = levels[dep] + 1;
+            }
+        }
+        levels[scc] = myLevel;
+        if (myLevel > maxLevel) {
+            maxLevel = myLevel;
+        }
+    }
+
+    Array<BuildStep> steps;
+    for (usz i = 0; i <= maxLevel; ++i) {
+        steps.push(BuildStep());
+    }
+
+    for (usz i = 0; i < topoOrder.size(); ++i) {
+        usz scc = topoOrder[i];
+        usz lvl = levels[scc];
+        for (usz j = 0; j < sccs[scc].size(); ++j) {
+            steps[lvl].nodeIndices.push(sccs[scc][j]);
+        }
+    }
+
+    for (usz i = 0; i < steps.size(); ++i) {
+        if (steps[i].nodeIndices.size() > 0) {
+            plan.steps.push(Xi::Move(steps[i]));
+        }
     }
 
     return plan;

@@ -53,12 +53,14 @@ public:
     // --- Configuration ---
     String assetsDir;
     String outputPath;
+    Array<String> includePaths;
 
     // --- Pipeline ---
     void input(const String& name, const String& content);
     void find();    ///< Discover all imports, build DAG, compute build plan
-    void build(const String& targetName);  ///< Execute the build plan
+    bool build(const String& targetName);  ///< Execute the build plan
     void eval(const String& language);     ///< REPL/eval mode
+    String evalCode(const String& code);  ///< Evaluate code in current eval context
     void destroy();
 
     ~Engine() { destroy(); }
@@ -78,6 +80,9 @@ private:
     BuildPlan _plan;
     EvalContext _evalCtx;
     String _generatedTsGlue;
+    String _generatedJsGlue;
+    String _generatedQuickjsBindings;
+    Array<String> _inferredIncludeRoots;
 
     /// Detect language by file extension.
     String detectLanguage(const String& path) const;

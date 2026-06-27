@@ -11,8 +11,26 @@
  */
 
 #include <Languages/CPP/CppPreprocessor.hpp>
+#include <sys/stat.h>
+#include <cstdlib>
+#include <unistd.h>
+#include <cstring>
 
 namespace Sew { namespace Languages {
+
+static String getSewIncludePath() {
+    char path[1024];
+    ssize_t len = ::readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len != -1) {
+        path[len] = '\0';
+        char* lastSlash = ::strrchr(path, '/');
+        if (lastSlash) {
+            *lastSlash = '\0';
+            return String(path) + "/../include";
+        }
+    }
+    return "include";
+}
 
 // ─── Utilities ──────────────────────────────────────────────────────────
 
@@ -98,6 +116,7 @@ void CppPreprocessor::handleDefine(const String& args, Map<String, MacroDef>& de
         p++; // skip '('
         // Parse params
         while (p < end && *p != ')') {
+            const u8* loopStart = p;
             while (p < end && isSpace(*p)) p++;
             const u8* paramStart = p;
             while (p < end && isAlnum(*p)) p++;
@@ -106,6 +125,9 @@ void CppPreprocessor::handleDefine(const String& args, Map<String, MacroDef>& de
             }
             while (p < end && isSpace(*p)) p++;
             if (p < end && *p == ',') p++;
+            if (p == loopStart) {
+                p++;
+            }
         }
         if (p < end && *p == ')') p++;
     }
@@ -357,15 +379,113 @@ String CppPreprocessor::replaceInPath(const String& path, const String& from, co
     return path.replace(from, to);
 }
 
-String CppPreprocessor::resolveIncludePath(const String& specifier, const String& currentFile) {
-    // 1. Try relative to current file
-    String dir = dirOf(currentFile);
-    String relative = dir;
-    relative += "/";
-    relative += specifier;
+Array<String> CppPreprocessor::getSearchPaths(const String& currentFile) {
+    Array<String> paths;
+    paths.push(dirOf(currentFile));
+    for (usz i = 0; i < includePaths.size(); ++i) {
+        paths.push(includePaths[i]);
+    }
+    paths.push(getSewIncludePath());
+    struct stat st;
+    if (::stat("include", &st) == 0 && S_ISDIR(st.st_mode)) {
+        paths.push("include");
+    }
 
-    // Return the resolved path (existence check is caller's responsibility)
-    return relative;
+    const char* xicPath = getenv("SEW_XIC_INCLUDE");
+    if (xicPath) {
+        paths.push(xicPath);
+    } else {
+        const char* tryPaths[] = {
+            "../xic/include",
+            "/home/xi/Repo/xic/include",
+            nullptr
+        };
+        for (int i = 0; tryPaths[i]; ++i) {
+            struct stat st;
+            if (::stat(tryPaths[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+                paths.push(tryPaths[i]);
+                break;
+            }
+        }
+    }
+
+    const char* extraInclude = getenv("SEW_EXTRA_INCLUDE");
+    if (extraInclude) {
+        String extraStr(extraInclude);
+        String current;
+        for (usz i = 0; i < extraStr.length(); ++i) {
+            if (extraStr.data()[i] == ':') {
+                if (!current.isEmpty()) {
+                    paths.push(current);
+                    current.clear();
+                }
+            } else {
+                current.push(extraStr.data()[i]);
+            }
+        }
+        if (!current.isEmpty()) {
+            paths.push(current);
+        }
+    }
+    return paths;
+}
+
+static String canonicalizePath(const String& path) {
+    char* rp = ::realpath(path.c_str(), nullptr);
+    if (rp) {
+        String res(rp);
+        free(rp);
+        return res;
+    }
+    String absPath = path;
+    if (!path.startsWith("/")) {
+        char cwd[1024];
+        if (::getcwd(cwd, sizeof(cwd))) {
+            absPath = String(cwd) + "/" + path;
+        }
+    }
+    Array<String> parts = absPath.split("/");
+    Array<String> clean;
+    for (usz i = 0; i < parts.size(); ++i) {
+        if (parts[i] == "." || parts[i].isEmpty()) continue;
+        if (parts[i] == "..") {
+            if (clean.size() > 0 && clean[clean.size() - 1] != "..") {
+                clean.pop();
+            } else {
+                clean.push("..");
+            }
+        } else {
+            clean.push(parts[i]);
+        }
+    }
+    String res;
+    if (absPath.startsWith("/")) res += "/";
+    for (usz i = 0; i < clean.size(); ++i) {
+        if (i > 0) res += "/";
+        res += clean[i];
+    }
+    return res;
+}
+
+String CppPreprocessor::resolveIncludePath(const String& specifier, const String& currentFile) {
+    if (specifier.startsWith("/")) {
+        return canonicalizePath(specifier);
+    }
+
+    Array<String> paths = getSearchPaths(currentFile);
+    for (usz i = 0; i < paths.size(); ++i) {
+        String candidate = paths[i];
+        if (!candidate.endsWith("/")) {
+            candidate += "/";
+        }
+        candidate += specifier;
+        candidate = canonicalizePath(candidate);
+        struct stat st;
+        if (::stat(candidate.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            return candidate;
+        }
+    }
+    return "";
 }
 
 Array<String> CppPreprocessor::findSiblingSourceFiles(const String& headerPath) {
@@ -522,6 +642,12 @@ PreprocessorResult CppPreprocessor::process(const String& source, const String& 
                     if (closeQuote > 0) {
                         String spec = args.substring(1, (usz)closeQuote);
                         String resolved = resolveIncludePath(spec, filePath);
+                        if (resolved.isEmpty()) {
+                            // Fallback to relative path if not resolved (e.g. in tests)
+                            resolved = dirOf(filePath);
+                            if (!resolved.endsWith("/")) resolved += "/";
+                            resolved += spec;
+                        }
                         result.localIncludes.push(resolved);
 
                         // Check for sibling source files
@@ -531,15 +657,28 @@ PreprocessorResult CppPreprocessor::process(const String& source, const String& 
                         }
                     }
                 } else if (first == '<') {
-                    // System include — pass to clang
+                    // System/bracket include
                     long long closeAngle = args.indexOf('>');
                     if (closeAngle > 0) {
-                        result.systemIncludes.push(
-                            args.substring(1, (usz)closeAngle));
+                        String spec = args.substring(1, (usz)closeAngle);
+                        String resolved = resolveIncludePath(spec, filePath);
+                        if (!resolved.isEmpty()) {
+                            // If resolved, treat it as a local include!
+                            result.localIncludes.push(resolved);
+
+                            // Check for sibling source files
+                            Array<String> siblings = findSiblingSourceFiles(resolved);
+                            for (usz s = 0; s < siblings.size(); ++s) {
+                                result.siblingSourceFiles.push(siblings[s]);
+                            }
+                        } else {
+                            // True system header (e.g. <vector>, <cstdio>), pass to clang
+                            result.systemIncludes.push(spec);
+                            // Keep this line in stripped output for clang
+                            strippedSource += rawLine;
+                            strippedSource += "\n";
+                        }
                     }
-                    // Keep this line in stripped output for clang
-                    strippedSource += rawLine;
-                    strippedSource += "\n";
                 }
                 continue;
             }

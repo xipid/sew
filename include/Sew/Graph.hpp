@@ -17,6 +17,7 @@ struct SourceNode {
     String path;
     String language;        ///< "cpp", "js", "py"
     String content;
+    String contentHash;
     CompileForm form = CompileForm::Native;
     Array<usz> dependencies;
     usz sccId = 0;

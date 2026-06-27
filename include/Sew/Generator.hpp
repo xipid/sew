@@ -15,6 +15,14 @@ public:
     static String generateTsGlue(const Array<ParsedClass>& classes,
                                  const Array<ParsedFunction>& functions,
                                  const String& wasmFileName);
+
+    // Generate pure JS wrapper code
+    static String generateJsGlue(const Array<ParsedClass>& classes,
+                                 const Array<ParsedFunction>& functions);
+
+    // Generate QuickJS C wrappers for the C++ bridge
+    static String generateQuickjsBindings(const Array<ParsedClass>& classes,
+                                          const Array<ParsedFunction>& functions);
 };
 
 } // namespace Sew

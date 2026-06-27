@@ -4,11 +4,11 @@
  */
 
 #include <Sew/EvalContext.hpp>
-#include <Execution/Process.hpp>
+#include <System/Process.hpp>
 
 namespace Sew {
 
-using namespace Execution;
+using namespace System;
 
 void EvalContext::init(const String& language) {
     _language = language;

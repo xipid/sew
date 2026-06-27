@@ -19,6 +19,8 @@ struct LinkRequest {
     Array<String> flags;
     String assetsDir;
     String tsGlue;
+    String jsGlue;
+    String quickjsBindings;
 };
 
 /**
