@@ -692,9 +692,8 @@ bool Engine::build(const String& targetName) {
                     }
 
                     if (isRepl && (node.language == "cpp" || node.language == "c")) {
-                        bool isExplicit = explicitInputPaths.has(canonicalize(node.path));
                         bool isGenerated = node.path.endsWith("sew_bridge.cpp") || node.path.endsWith("sew_qjs_bindings.cpp");
-                        if (!isExplicit && !isGenerated) {
+                        if (!isGenerated) {
                             std::lock_guard<std::mutex> lock(stateMutex);
                             node.compiled = true;
                             compiled++;

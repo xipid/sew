@@ -586,10 +586,10 @@ int main(int argc, char** argv) {
         if (!quiet) Success("Output: " + outPath);
     };
 
+    sew.onWarn = [](String msg) { Warn(msg); };
+    sew.onError = [](String msg) { Error(msg); };
     if (!quiet && (stdinLang.length() == 0 || target.length() > 0)) {
         sew.onInfo = [](String msg) { Info(msg); };
-        sew.onWarn = [](String msg) { Warn(msg); };
-        sew.onError = [](String msg) { Error(msg); };
     }
 
     sew.assetsDir = assets;
@@ -643,7 +643,8 @@ int main(int argc, char** argv) {
 
         // Input piped code or script code if they exist so dependency discovery works
         if (pipedCode.length() > 0) {
-            sew.input("stdin.js", pipedCode);
+            String stdinFileName = "stdin." + stdinLang;
+            sew.input(stdinFileName, pipedCode);
         } else if (scriptCode.length() > 0) {
             sew.input(scriptFile, scriptCode);
         }

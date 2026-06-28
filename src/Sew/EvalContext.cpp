@@ -16,6 +16,7 @@ using namespace System;
 
 struct CppReplContext {
     String headers;
+    String types;
     String declarations;
     usz stepCount = 0;
 };
@@ -81,7 +82,46 @@ String EvalContext::eval(const String& code) {
         if (line.startsWith("struct ") || line.startsWith("class ") || line.startsWith("using ") || 
             line.startsWith("template ") || line.startsWith("inline ") ||
             (line.indexOf("(") >= 0 && line.indexOf(")") >= 0 && line.indexOf("{") >= 0)) {
-            ctx->declarations += code + "\n";
+            
+            // Redefinition support: find and remove existing struct/class declaration of the same name
+            String structName;
+            bool isType = line.startsWith("struct ") || line.startsWith("class ");
+            if (isType) {
+                Array<String> parts = line.split(" ");
+                if (parts.size() > 1) {
+                    structName = parts[1];
+                    usz idx = structName.indexOf("{");
+                    if (idx != (usz)-1) {
+                        structName = structName.substring(0, idx).trim();
+                    }
+                    idx = structName.indexOf(":");
+                    if (idx != (usz)-1) {
+                        structName = structName.substring(0, idx).trim();
+                    }
+                }
+            }
+
+            if (!structName.isEmpty()) {
+                String searchStr1 = "struct " + structName;
+                String searchStr2 = "class " + structName;
+                long long foundIdx = ctx->types.indexOf(searchStr1);
+                if (foundIdx == -1) {
+                    foundIdx = ctx->types.indexOf(searchStr2);
+                }
+                if (foundIdx != -1) {
+                    long long closeIdx = ctx->types.indexOf("};", (usz)foundIdx);
+                    if (closeIdx != -1) {
+                        ctx->types = ctx->types.substring(0, (usz)foundIdx) + 
+                                     ctx->types.substring((usz)closeIdx + 2);
+                    }
+                }
+            }
+
+            if (isType) {
+                ctx->types += code + "\n";
+            } else {
+                ctx->declarations += code + "\n";
+            }
             return "";
         }
 
@@ -91,6 +131,8 @@ String EvalContext::eval(const String& code) {
 
         String src = "#include <cstdio>\n#include <iostream>\n";
         src += ctx->headers;
+        src += "\n";
+        src += ctx->types;
         src += "\n";
         src += ctx->declarations;
         src += "\n";
