@@ -700,10 +700,23 @@ int main(int argc, char** argv) {
         sew.eval(stdinLang);
 
         // Run the script file or piped code first
-        if (scriptCode.length() > 0) {
-            sew.evalCode(stripImports(scriptCode));
-        } else if (pipedCode.length() > 0) {
-            sew.evalCode(stripImports(pipedCode));
+        if (stdinLang == "cpp") {
+            String fullCode = scriptCode.length() > 0 ? scriptCode : pipedCode;
+            Array<String> lines = fullCode.split("\n");
+            for (usz idx = 0; idx < lines.size(); ++idx) {
+                String line = lines[idx].trim();
+                if (line.isEmpty()) continue;
+                String res = sew.evalCode(line);
+                if (res.length() > 0) {
+                    printf("%s\n", res.c_str());
+                }
+            }
+        } else {
+            if (scriptCode.length() > 0) {
+                sew.evalCode(stripImports(scriptCode));
+            } else if (pipedCode.length() > 0) {
+                sew.evalCode(stripImports(pipedCode));
+            }
         }
 
         // Start the interactive prompt if input is a TTY and either --stdin was requested or no script was supplied
