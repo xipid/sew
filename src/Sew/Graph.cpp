@@ -171,10 +171,25 @@ BuildPlan DepGraph::computeBuildPlan() const {
     for (usz i = 0; i < topoOrder.size(); ++i) {
         usz scc = topoOrder[i];
         usz myLevel = 0;
-        for (usz d = 0; d < sccDeps[scc].size(); ++d) {
-            usz dep = sccDeps[scc][d];
-            if (levels[dep] + 1 > myLevel) {
-                myLevel = levels[dep] + 1;
+
+        bool hasCppSource = false;
+        for (usz j = 0; j < sccs[scc].size(); ++j) {
+            usz nodeIdx = sccs[scc][j];
+            String path = nodes[nodeIdx].path;
+            if (path.endsWith(".cpp") || path.endsWith(".c") || path.endsWith(".cc") || path.endsWith(".cxx")) {
+                hasCppSource = true;
+                break;
+            }
+        }
+
+        if (hasCppSource) {
+            myLevel = 0;
+        } else {
+            for (usz d = 0; d < sccDeps[scc].size(); ++d) {
+                usz dep = sccDeps[scc][d];
+                if (levels[dep] + 1 > myLevel) {
+                    myLevel = levels[dep] + 1;
+                }
             }
         }
         levels[scc] = myLevel;

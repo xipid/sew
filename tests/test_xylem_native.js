@@ -1,4 +1,4 @@
-import { XylemEngine } from "/home/xi/Repo/xylem/include/Xylem/Xylem.hpp";
+import { XylemEngine } from "Xylem/Xylem.hpp";
 
 const db = new XylemEngine();
 db.config.deviceSize = 10 * 1024 * 1024;
@@ -16,6 +16,6 @@ console.log("tee result code:", helloResult.code);
 
 const catResult = db.cat("/hello.txt", 0, 0);
 console.log("cat result code:", catResult.code);
-const rowsJson = catResult.getRowsJson();
-console.log("rows JSON:", rowsJson);
+const rowsJson = JSON.parse(catResult.getRowsJson());
+console.log("rows JSON: " + Object.keys(rowsJson).join(" "));
 console.log("Successfully ran test_xylem_native!");

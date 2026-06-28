@@ -81,7 +81,7 @@ public:
 };
 
 // Global instance variable
-extern GlobalRegistry global;
+inline GlobalRegistry global;
 
 }} // namespace Sew::Reflect
 

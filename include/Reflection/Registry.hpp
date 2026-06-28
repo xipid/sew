@@ -8,11 +8,26 @@ namespace Sew { namespace Reflect {
 
 class __attribute__((visibility("default"))) ReflectionRegistry {
 public:
-    static Map<String, StructDescriptor>& structs();
-    static Map<String, StructDescriptor>& oldStructs();
-    static Map<usz, String>& activeInstances();
-    static Map<usz, usz>& redirectionTable();
-    static Map<usz, Map<String, Xi::Func<void*(void*, void*)>>>& methodOverrides();
+    static Map<String, StructDescriptor>& structs() {
+        static Map<String, StructDescriptor> s_structs;
+        return s_structs;
+    }
+    static Map<String, StructDescriptor>& oldStructs() {
+        static Map<String, StructDescriptor> s_oldStructs;
+        return s_oldStructs;
+    }
+    static Map<usz, String>& activeInstances() {
+        static Map<usz, String> s_instances;
+        return s_instances;
+    }
+    static Map<usz, usz>& redirectionTable() {
+        static Map<usz, usz> s_redirections;
+        return s_redirections;
+    }
+    static Map<usz, Map<String, Xi::Func<void*(void*, void*)>>>& methodOverrides() {
+        static Map<usz, Map<String, Xi::Func<void*(void*, void*)>>> s_overrides;
+        return s_overrides;
+    }
 
     static void registerStruct(const StructDescriptor& desc) {
         const StructDescriptor* oldDesc = getStruct(desc.name);
@@ -30,9 +45,15 @@ public:
         return oldStructs().get(name);
     }
 
-    static Map<String, usz>& globalVariables();
+    static Map<String, usz>& globalVariables() {
+        static Map<String, usz> s_vars;
+        return s_vars;
+    }
     static void registerVariable(const String& name, void* ptr);
-    static Map<usz, bool>& heapInstances();
+    static Map<usz, bool>& heapInstances() {
+        static Map<usz, bool> s_heap;
+        return s_heap;
+    }
 
     static void registerInstance(const String& typeName, void* ptr);
     static void deregisterInstance(void* ptr);

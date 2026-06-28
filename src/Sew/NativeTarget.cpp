@@ -103,7 +103,7 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
 
     // Generate bootloader if we have JS
     if (hasJs) {
-        String sewBridgeIdent = "sew_bridge_js";
+        String sewBridgeIdent;
         for (usz idx : jsUnitIndices) {
             String name = req.units[idx].outputPath;
             if (name.indexOf("sew_bridge") >= 0) {
@@ -120,7 +120,7 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
         boot += "#include <cstdint>\n\n";
 
         // Declare QuickJS C bindings
-        boot += "extern \"C\" void register_sew_native_bindings(JSContext *ctx, JSValue native_obj);\n\n";
+        boot += "__attribute__((weak)) extern \"C\" void register_sew_native_bindings(JSContext *ctx, JSValue native_obj);\n\n";
 
         // Embed bytecodes for each JS unit
         for (usz idx : jsUnitIndices) {
@@ -133,15 +133,14 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
 
         // Console helper
         boot += "static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {\n";
-        boot += "  fprintf(stderr, \"[CONSOLE_LOG] \");\n";
         boot += "  for (int i = 0; i < argc; ++i) {\n";
         boot += "    const char *str = JS_ToCString(ctx, argv[i]);\n";
         boot += "    if (str) {\n";
-        boot += "      fprintf(stderr, \"%s%s\", i > 0 ? \" \" : \"\", str);\n";
+        boot += "      printf(\"%s%s\", i > 0 ? \" \" : \"\", str);\n";
         boot += "      JS_FreeCString(ctx, str);\n";
         boot += "    }\n";
         boot += "  }\n";
-        boot += "  fprintf(stderr, \"\\n\");\n";
+        boot += "  printf(\"\\n\");\n";
         boot += "  return JS_UNDEFINED;\n";
         boot += "}\n\n";
 
@@ -155,24 +154,25 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
                 "}\n\n";
 
         boot += "static JSModuleDef *js_module_loader(JSContext *ctx, const char *module_name, void *opaque) {\n";
-        boot += "  fprintf(stderr, \"[MODULE_LOADER] Loading: %s\\n\", module_name);\n";
         
         // Check for sew_bridge
-        boot += "  if (strstr(module_name, \"sew_bridge\") != nullptr || strstr(module_name, \"Xylem.hpp\") != nullptr) {\n";
-        boot += "    JSValue val = JS_ReadObject(ctx, " + sewBridgeIdent + "_bytecode, " + sewBridgeIdent + "_bytecode_len, JS_READ_OBJ_BYTECODE);\n";
-        boot += "    if (JS_IsException(val)) return nullptr;\n";
-        boot += "    JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(val);\n";
-        boot += "    JSValue res = JS_EvalFunction(ctx, val);\n";
-        boot += "    if (JS_IsException(res)) {\n";
-        boot += "      JSValue exc = JS_GetException(ctx);\n";
-        boot += "      const char *err = JS_ToCString(ctx, exc);\n";
-        boot += "      fprintf(stderr, \"[MODULE_LOADER ERROR] %s\\n\", err);\n";
-        boot += "      JS_FreeCString(ctx, err);\n";
-        boot += "      JS_FreeValue(ctx, exc);\n";
-        boot += "    }\n";
-        boot += "    JS_FreeValue(ctx, res);\n";
-        boot += "    return m;\n";
-        boot += "  }\n";
+        if (!sewBridgeIdent.isEmpty()) {
+            boot += "  if (strstr(module_name, \"sew_bridge\") != nullptr || strstr(module_name, \"Xylem.hpp\") != nullptr) {\n";
+            boot += "    JSValue val = JS_ReadObject(ctx, " + sewBridgeIdent + "_bytecode, " + sewBridgeIdent + "_bytecode_len, JS_READ_OBJ_BYTECODE);\n";
+            boot += "    if (JS_IsException(val)) return nullptr;\n";
+            boot += "    JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(val);\n";
+            boot += "    JSValue res = JS_EvalFunction(ctx, val);\n";
+            boot += "    if (JS_IsException(res)) {\n";
+            boot += "      JSValue exc = JS_GetException(ctx);\n";
+            boot += "      const char *err = JS_ToCString(ctx, exc);\n";
+            boot += "      fprintf(stderr, \"[MODULE_LOADER ERROR] %s\\n\", err);\n";
+            boot += "      JS_FreeCString(ctx, err);\n";
+            boot += "      JS_FreeValue(ctx, exc);\n";
+            boot += "    }\n";
+            boot += "    JS_FreeValue(ctx, res);\n";
+            boot += "    return m;\n";
+            boot += "  }\n";
+        }
 
         // Check for other modules
         for (usz idx : jsUnitIndices) {
@@ -212,9 +212,21 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
         boot += "  JSValue console = JS_NewObject(ctx);\n";
         boot += "  JS_SetPropertyStr(ctx, console, \"log\", JS_NewCFunction(ctx, js_console_log, \"log\", 1));\n";
         boot += "  JS_SetPropertyStr(ctx, global_obj, \"console\", console);\n";
-        boot += "  JSValue native_obj = JS_NewObject(ctx);\n";
-        boot += "  register_sew_native_bindings(ctx, native_obj);\n";
-        boot += "  JS_SetPropertyStr(ctx, global_obj, \"__sew_native\", native_obj);\n";
+        boot += "  if (register_sew_native_bindings) {\n";
+        boot += "    JSValue native_obj = JS_NewObject(ctx);\n";
+        boot += "    register_sew_native_bindings(ctx, native_obj);\n";
+        boot += "    JS_SetPropertyStr(ctx, global_obj, \"__sew_native\", native_obj);\n";
+        boot += "  }\n";
+        boot += "  {\n";
+        boot += "    JSValue args = JS_NewArray(ctx);\n";
+        boot += "    for (int i = 0; i < argc; ++i) {\n";
+        boot += "      JS_SetPropertyUint32(ctx, args, i, JS_NewString(ctx, argv[i]));\n";
+        boot += "    }\n";
+        boot += "    JS_SetPropertyStr(ctx, global_obj, \"scriptArgs\", JS_DupValue(ctx, args));\n";
+        boot += "    JSValue process = JS_NewObject(ctx);\n";
+        boot += "    JS_SetPropertyStr(ctx, process, \"argv\", args);\n";
+        boot += "    JS_SetPropertyStr(ctx, global_obj, \"process\", process);\n";
+        boot += "  }\n";
         boot += "  JS_FreeValue(ctx, global_obj);\n\n";
 
 
@@ -245,14 +257,7 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
                 boot += "        JS_FreeCString(ctx, err);\n";
                 boot += "        JS_FreeValue(ctx, exc);\n";
                 boot += "      } else {\n";
-                boot += "        fprintf(stderr, \"[MAIN] Evaluating module %s\\n\", \"" + name + "\");\n";
                 boot += "        JSValue res = JS_EvalFunction(ctx, val);\n";
-                boot += "        fprintf(stderr, \"[MAIN] Evaluated module. res tag: %d\\n\", JS_VALUE_GET_TAG(res));\n";
-                boot += "        const char *res_str = JS_ToCString(ctx, res);\n";
-                boot += "        if (res_str) {\n";
-                boot += "          fprintf(stderr, \"[MAIN] res string: %s\\n\", res_str);\n";
-                boot += "          JS_FreeCString(ctx, res_str);\n";
-                boot += "        }\n";
                 boot += "        JSValue global_obj2 = JS_GetGlobalObject(ctx);\n";
                 boot += "        JS_SetPropertyStr(ctx, global_obj2, \"__main_promise\", JS_DupValue(ctx, res));\n";
                 boot += "        JS_FreeValue(ctx, global_obj2);\n";
@@ -274,13 +279,20 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
 
         boot += "  {\n";
         boot += "    JSContext *ctx1;\n";
-        boot += "    while (JS_ExecutePendingJob(rt, &ctx1) > 0) {\n";
-        boot += "      JSValue exc = JS_GetException(ctx1);\n";
-        boot += "      if (!JS_IsNull(exc) && !JS_IsUndefined(exc)) {\n";
-        boot += "        const char *err = JS_ToCString(ctx1, exc);\n";
-        boot += "        fprintf(stderr, \"[Pending Job Error] %s\\n\", err);\n";
-        boot += "        JS_FreeCString(ctx1, err);\n";
-        boot += "        JS_FreeValue(ctx1, exc);\n";
+        boot += "    int pending_err;\n";
+        boot += "    for (;;) {\n";
+        boot += "      pending_err = JS_ExecutePendingJob(rt, &ctx1);\n";
+        boot += "      if (pending_err <= 0) {\n";
+        boot += "        if (pending_err < 0) {\n";
+        boot += "          JSValue exc = JS_GetException(ctx1);\n";
+        boot += "          if (!JS_IsNull(exc) && !JS_IsUndefined(exc)) {\n";
+        boot += "            const char *err = JS_ToCString(ctx1, exc);\n";
+        boot += "            fprintf(stderr, \"[Pending Job Error] %s\\n\", err);\n";
+        boot += "            JS_FreeCString(ctx1, err);\n";
+        boot += "          }\n";
+        boot += "          JS_FreeValue(ctx1, exc);\n";
+        boot += "        }\n";
+        boot += "        break;\n";
         boot += "      }\n";
         boot += "    }\n";
         boot += "  }\n\n";
@@ -328,10 +340,17 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
         objects.push("/tmp/sew_bootloader.o");
     }
 
-    // Use clang++ with mold linker
+    // Use clang++ with mold linker (unless compiling to wasm)
     Process p;
-    p.file = "clang++";
-    p.arg.push("-fuse-ld=mold");
+    bool isWasm = (_triple.indexOf("wasm32") >= 0);
+    if (isWasm) {
+        const char* home = ::getenv("HOME");
+        String sdkDir = home ? String(home) + "/.cache/sew/wasi-sdk" : "";
+        p.file = sdkDir.isEmpty() ? "clang++" : sdkDir + "/bin/clang++";
+    } else {
+        p.file = "clang++";
+        p.arg.push("-fuse-ld=mold");
+    }
     if (isShared) {
         p.arg.push("-shared");
         p.arg.push("-fPIC");
@@ -380,6 +399,7 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
     // Link SewLib and quickjs statically to resolve C++ runtime/reflection symbols
     // unless we are compiling a shared library (.so)
     if (!isShared) {
+        p.arg.push("-rdynamic");
         p.arg.push(getExecutableDir() + "/libquickjs.a");
         p.arg.push(getExecutableDir() + "/libSewLib.a");
         p.arg.push("-lm");

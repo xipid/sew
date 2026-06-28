@@ -5,7 +5,6 @@
 
 namespace Sew { namespace Reflect {
 
-GlobalRegistry global;
 
 Reflection::Reflection() : _isPrototype(true) {
     _dynamicProps = new Map<String, DynamicProp>();
@@ -221,35 +220,7 @@ void* Reflection::originalMethod(const String& name) const {
     return nullptr;
 }
 
-Map<String, StructDescriptor>& ReflectionRegistry::structs() {
-    static Map<String, StructDescriptor> s_structs;
-    return s_structs;
-}
 
-Map<String, StructDescriptor>& ReflectionRegistry::oldStructs() {
-    static Map<String, StructDescriptor> s_oldStructs;
-    return s_oldStructs;
-}
-
-Map<usz, String>& ReflectionRegistry::activeInstances() {
-    static Map<usz, String> s_instances;
-    return s_instances;
-}
-
-Map<usz, usz>& ReflectionRegistry::redirectionTable() {
-    static Map<usz, usz> s_redirections;
-    return s_redirections;
-}
-
-Map<usz, Map<String, Xi::Func<void*(void*, void*)>>>& ReflectionRegistry::methodOverrides() {
-    static Map<usz, Map<String, Xi::Func<void*(void*, void*)>>> s_overrides;
-    return s_overrides;
-}
-
-Map<String, usz>& ReflectionRegistry::globalVariables() {
-    static Map<String, usz> s_vars;
-    return s_vars;
-}
 
 void ReflectionRegistry::registerVariable(const String& name, void* ptr) {
     usz addr = (usz)ptr;
@@ -293,10 +264,7 @@ void ReflectionRegistry::deregisterInstance(void* ptr) {
     activeInstances().remove((usz)ptr);
 }
 
-Map<usz, bool>& ReflectionRegistry::heapInstances() {
-    static Map<usz, bool> s_heap;
-    return s_heap;
-}
+
 
 void* ReflectionRegistry::create(const String& typeName) {
     const StructDescriptor* desc = getStruct(typeName);

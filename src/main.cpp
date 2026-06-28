@@ -193,6 +193,56 @@ static String inferIncludeRoot(const String& path) {
     return path.substring(0, (usz)includePos);
 }
 
+static void sweepIncludesInParent(const String& parentPath, Array<String>& includeDirs) {
+    DIR* dir = ::opendir(parentPath.c_str());
+    if (!dir) return;
+
+    while (struct dirent* entry = ::readdir(dir)) {
+        String name = entry->d_name;
+        if (name == "." || name == "..") continue;
+
+        String subPath = parentPath;
+        if (!subPath.endsWith("/")) subPath += "/";
+        subPath += name;
+
+        struct stat st;
+        if (::stat(subPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            String includePath = subPath + "/include";
+            struct stat stInc;
+            if (::stat(includePath.c_str(), &stInc) == 0 && S_ISDIR(stInc.st_mode)) {
+                if (!containsPath(includeDirs, includePath)) {
+                    includeDirs.push(includePath);
+                }
+            }
+        }
+    }
+    ::closedir(dir);
+}
+
+static void sweepSiblingIncludes(Array<String>& includeDirs) {
+    // 1. Sweep from current working directory parent
+    char cwdBuf[1024];
+    if (::getcwd(cwdBuf, sizeof(cwdBuf))) {
+        String cwd(cwdBuf);
+        String parent = parentDir(cwd);
+        if (!parent.isEmpty()) {
+            sweepIncludesInParent(parent, includeDirs);
+        }
+    }
+
+    // 2. Sweep from executable parent's parent (e.g. /home/xi/Repo/sew/build -> /home/xi/Repo)
+    String execDir = executableDir();
+    if (!execDir.isEmpty()) {
+        String sewRoot = parentDir(execDir);
+        if (!sewRoot.isEmpty()) {
+            String repoRoot = parentDir(sewRoot);
+            if (!repoRoot.isEmpty()) {
+                sweepIncludesInParent(repoRoot, includeDirs);
+            }
+        }
+    }
+}
+
 static void listFilesRecursive(const String& dirPath, Array<String>& outFiles) {
     DIR* dir = ::opendir(dirPath.c_str());
     if (!dir) return;
@@ -313,8 +363,29 @@ static Array<String> expandInputPatterns(const Array<String>& patterns) {
 
 // ─── Main ───────────────────────────────────────────────────────────────
 
+namespace Sew { namespace Languages {
+    extern Array<String> g_realArgs;
+}}
+using namespace Sew::Languages;
+
 int main(int argc, char** argv) {
-    Command args(argc, argv);
+    // Populate g_realArgs from argv after '--' separator
+    int separatorIndex = -1;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--") == 0) {
+            separatorIndex = i;
+            break;
+        }
+    }
+    int parseArgc = argc;
+    if (separatorIndex >= 0) {
+        for (int i = separatorIndex + 1; i < argc; ++i) {
+            g_realArgs.push(argv[i]);
+        }
+        parseArgc = separatorIndex;
+    }
+
+    Command args(parseArgc, argv);
     args.description("sew — polyglot build system").version("1.0.0");
 
     // --- Options ---
@@ -334,13 +405,25 @@ int main(int argc, char** argv) {
         .description("Additional include directory; may be repeated")
         .value;
 
+    const char* envXic = getenv("SEW_XIC_INCLUDE");
+    if (envXic && !containsPath(includeDirs, envXic)) {
+        includeDirs.push(envXic);
+    }
+    const char* envRho = getenv("SEW_RHO_INCLUDE");
+    if (envRho && !containsPath(includeDirs, envRho)) {
+        includeDirs.push(envRho);
+    }
+
+    sweepSiblingIncludes(includeDirs);
+
     String stdinLang = args.option("--stdin")
         .description("Language for stdin input / eval mode")
         .string();
 
     bool showHelp = args.flag("--help -h");
     bool showVersion = args.flag("--version -v");
-    bool quiet = args.flag("--quiet -q");
+    bool showProgress = args.flag("--progress -p").active;
+    bool quiet = !showProgress;
     bool noCache = false;
     Command& cacheOpt = args.flag("--cache");
     if (cacheOpt.active && cacheOpt.value.size() > 0 && cacheOpt.value[0] == "false") {
@@ -389,17 +472,13 @@ int main(int argc, char** argv) {
 
     if (target == "js") {
         String xylemRoot;
-        for (usz i = 0; i < sources.size(); ++i) {
-            xylemRoot = inferIncludeRoot(sources[i]);
-            if (!xylemRoot.isEmpty()) {
+        for (usz i = 0; i < includeDirs.size(); ++i) {
+            if (includeDirs[i].endsWith("/xylem/include") || includeDirs[i].endsWith("../xylem/include") || includeDirs[i].endsWith("xylem/include")) {
+                xylemRoot = includeDirs[i].substring(0, includeDirs[i].length() - 8);
                 break;
             }
         }
         if (!xylemRoot.isEmpty()) {
-            String xylemInclude = xylemRoot + "/include";
-            if (!containsPath(includeDirs, xylemInclude)) {
-                includeDirs.push(xylemInclude);
-            }
             String watcherCpp = xylemRoot + "/src/Xylem/Watcher.cpp";
             if (fileExists(watcherCpp) && !containsPath(sources, watcherCpp)) {
                 sources.push(watcherCpp);
@@ -429,7 +508,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!quiet && (stdinLang.length() == 0 || target.length() > 0)) fprintf(stderr, "Sew v1\n\n");
+
 
     i64 startTime = millis();
 
@@ -447,45 +526,6 @@ int main(int argc, char** argv) {
         sew.includePaths.push(includeDirs[i]);
     }
 
-    const char* xicPath = getenv("SEW_XIC_INCLUDE");
-    if (xicPath) {
-        cppLang.preprocessor().includePaths.push(xicPath);
-        sew.includePaths.push(xicPath);
-    } else {
-        const char* tryPaths[] = {
-            "../xic/include",
-            "/home/xi/Repo/xic/include",
-            nullptr
-        };
-        for (int i = 0; tryPaths[i]; ++i) {
-            struct stat st;
-            if (stat(tryPaths[i], &st) == 0) {
-                cppLang.preprocessor().includePaths.push(tryPaths[i]);
-                sew.includePaths.push(tryPaths[i]);
-                break;
-            }
-        }
-    }
-
-    const char* rhoPath = getenv("SEW_RHO_INCLUDE");
-    if (rhoPath) {
-        cppLang.preprocessor().includePaths.push(rhoPath);
-        sew.includePaths.push(rhoPath);
-    } else {
-        const char* tryRhoPaths[] = {
-            "../rho/include",
-            "/home/xi/Repo/rho/include",
-            nullptr
-        };
-        for (int i = 0; tryRhoPaths[i]; ++i) {
-            struct stat st;
-            if (stat(tryRhoPaths[i], &st) == 0) {
-                cppLang.preprocessor().includePaths.push(tryRhoPaths[i]);
-                sew.includePaths.push(tryRhoPaths[i]);
-                break;
-            }
-        }
-    }
 
     const char* extraInclude = getenv("SEW_EXTRA_INCLUDE");
     if (extraInclude) {
@@ -582,15 +622,8 @@ int main(int argc, char** argv) {
         }
     };
 
-    sew.onFinish = [&quiet](String outPath) {
-        if (!quiet) Success("Output: " + outPath);
-    };
-
     sew.onWarn = [](String msg) { Warn(msg); };
     sew.onError = [](String msg) { Error(msg); };
-    if (!quiet && (stdinLang.length() == 0 || target.length() > 0)) {
-        sew.onInfo = [](String msg) { Info(msg); };
-    }
 
     sew.assetsDir = assets;
     sew.outputPath = output;
@@ -752,6 +785,9 @@ int main(int argc, char** argv) {
 
     // ─── Target Mode (Build) ────────────────────────────────────────────
 
+    if (target == "ts") {
+        target = "js";
+    }
     if (target.length() == 0 && output.length() > 0) {
         if (output.endsWith(".ts") || output.endsWith(".js")) {
             target = "js";
@@ -780,22 +816,8 @@ int main(int argc, char** argv) {
         sew.outputPath = output;
     }
 
-    if (!quiet) {
-        Info("Target: " + target);
-        Info("Output: " + output);
-
-        String sourceList;
-        for (usz i = 0; i < sources.size(); ++i) {
-            if (i > 0) sourceList += ", ";
-            sourceList += sources[i];
-        }
-        Info("Sources: " + sourceList);
-        fprintf(stderr, "\n");
-    }
-
     {
         // Add source files
-        i64 findStart = millis();
         for (usz i = 0; i < sources.size(); ++i) {
             String content = readFile(sources[i]);
             if (content.isEmpty()) {
@@ -805,41 +827,38 @@ int main(int argc, char** argv) {
             sew.input(sources[i], content);
         }
 
-        // Discover dependencies
-        sew.find();
-        i64 findElapsed = millis() - findStart;
-        if (!quiet) {
-            fprintf(stderr, "Discovery took %lld ms\n", (long long)findElapsed);
-        }
-
-        // Build
+        // Build progress bar
         Progress progress;
         usz progressTask = 0;
-        if (!quiet) {
-            progressTask = progress.addLinearTask((u64)sew.nodeCount(), "it", "Build");
+        if (showProgress) {
+            progressTask = progress.addLinearTask(1, "it", "Build");
             sew.onProgress = [&progress, progressTask](String msg, usz current, usz total) {
                 if (progress.tasks.size() == 0) return;
                 progress.message = msg;
-                progress.updateLinearTask(progressTask, current, msg);
+                if (msg == "Discovering") {
+                    progress.tasks[progressTask].totalRaw = (u64)current;
+                    progress.tasks[progressTask].total = String((long long)current);
+                    progress.updateLinearTask(progressTask, current, msg);
+                } else {
+                    progress.tasks[progressTask].totalRaw = (u64)total;
+                    progress.tasks[progressTask].total = String((long long)total);
+                    progress.updateLinearTask(progressTask, current, msg);
+                }
                 progress.update();
-                (void)total;
             };
         }
-        i64 buildStart = millis();
+
+        // Discover dependencies
+        sew.find();
+
+        // Build C++ / JS files
         bool ok = sew.build(target);
-        i64 buildElapsed = millis() - buildStart;
-        if (!quiet) {
+        if (showProgress) {
             progress.destroy();
-            fprintf(stderr, "Build took %lld ms\n", (long long)buildElapsed);
+            ClearLine();
+            fprintf(stderr, "\r");
         }
         if (!ok) return 1;
-    }
-
-    {
-        i64 totalElapsed = millis() - startTime;
-        if (!quiet) {
-            fprintf(stderr, "Total took %lld ms\n", (long long)totalElapsed);
-        }
     }
 
 cleanup:

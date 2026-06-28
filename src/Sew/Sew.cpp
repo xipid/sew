@@ -160,17 +160,101 @@ String Engine::resolveImport(const ImportSpec& imp, const String& currentFile) {
     // If already absolute or relative, use as-is
     if (spec.startsWith("/") || spec.startsWith("./") || spec.startsWith("../")) {
         res = spec;
+        return canonicalize(res);
+    }
+
+    // Bare specifier walk-up and search helper
+    auto checkCandidate = [](const String& path, String& outFound) -> bool {
+        struct stat st;
+        if (::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            outFound = path;
+            return true;
+        }
+        const char* tryExts[] = {
+            ".cpp", ".c", ".cc", ".cxx",
+            ".hpp", ".h", ".hxx",
+            ".js", ".ts", ".mjs",
+            ".py",
+            ".wasm",
+            nullptr
+        };
+        for (int e = 0; tryExts[e]; ++e) {
+            String cand = path + tryExts[e];
+            if (::stat(cand.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                outFound = cand;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 1. Walking up tree (%%include, %%node_modules, %%deps)
+    long long lastSlash = -1;
+    for (usz i = 0; i < currentFile.size(); ++i) {
+        if (currentFile.data()[i] == '/') lastSlash = (long long)i;
+    }
+    String currentDir;
+    if (lastSlash >= 0) {
+        currentDir = currentFile.substring(0, (usz)lastSlash);
     } else {
-        // Resolve relative to current file's directory
-        long long lastSlash = -1;
-        for (usz i = 0; i < currentFile.size(); ++i) {
-            if (currentFile.data()[i] == '/') lastSlash = (long long)i;
+        char cwd[1024];
+        if (::getcwd(cwd, sizeof(cwd))) {
+            currentDir = cwd;
+        }
+    }
+
+    String checkDir = currentDir;
+    bool found = false;
+    while (!checkDir.isEmpty()) {
+        checkDir = canonicalize(checkDir);
+        
+        if (checkCandidate(checkDir + "/include/" + spec, res)) {
+            found = true;
+            break;
+        }
+        if (checkCandidate(checkDir + "/node_modules/" + spec, res)) {
+            found = true;
+            break;
+        }
+        if (checkCandidate(checkDir + "/deps/" + spec, res)) {
+            found = true;
+            break;
         }
 
-        if (lastSlash >= 0) {
-            String dir = currentFile.substring(0, (usz)lastSlash);
-            res = dir + "/" + spec;
+        long long parentSlash = -1;
+        for (usz i = 0; i < checkDir.size(); ++i) {
+            if (checkDir.data()[i] == '/') parentSlash = (long long)i;
         }
+        if (parentSlash > 0) {
+            checkDir = checkDir.substring(0, (usz)parentSlash);
+        } else if (parentSlash == 0) {
+            // Root '/'
+            if (checkCandidate(String("/include/") + spec, res)) {
+                found = true;
+            } else if (checkCandidate(String("/node_modules/") + spec, res)) {
+                found = true;
+            } else if (checkCandidate(String("/deps/") + spec, res)) {
+                found = true;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+
+    // 2. If not found via walk-up, search in user include paths
+    if (!found) {
+        for (usz i = 0; i < includePaths.size(); ++i) {
+            if (checkCandidate(includePaths[i] + "/" + spec, res)) {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    // Fallback: resolve relative to nearest dir
+    if (!found) {
+        res = currentDir + "/" + spec;
     }
 
     return canonicalize(res);
@@ -533,14 +617,6 @@ void Engine::find() {
 
 
 
-    if (onInfo) {
-        String msg = "Found ";
-        msg += String((long long)_graph.nodes.size());
-        msg += " files in ";
-        msg += String((long long)_plan.steps.size());
-        msg += " build steps";
-        onInfo(msg);
-    }
 }
 
 bool Engine::build(const String& targetName) {
@@ -676,137 +752,151 @@ bool Engine::build(const String& targetName) {
                     usz nodeIdx = step.nodeIndices[j];
                     SourceNode& node = _graph.nodes[nodeIdx];
 
-                    if (node.compiled) continue;
-
-                    String ext;
-                    long long lastDot = -1;
-                    for (usz k = 0; k < node.path.size(); ++k) {
-                        if (node.path.data()[k] == '.') lastDot = (long long)k;
-                    }
-                    if (lastDot >= 0) ext = node.path.substring((usz)lastDot);
-                    if (ext == ".h" || ext == ".hpp" || ext == ".hxx") {
-                        std::lock_guard<std::mutex> lock(stateMutex);
-                        node.compiled = true;
-                        compiled++;
-                        continue;
-                    }
-
-                    if (isRepl && (node.language == "cpp" || node.language == "c")) {
-                        bool isGenerated = node.path.endsWith("sew_bridge.cpp") || node.path.endsWith("sew_qjs_bindings.cpp");
-                        if (!isGenerated) {
-                            std::lock_guard<std::mutex> lock(stateMutex);
-                            node.compiled = true;
-                            compiled++;
-                            continue;
-                        }
-                    }
-
-                    // Check cache
-                    String contentHash = node.contentHash;
-                    Array<String> depHashes;
-                    for (usz d = 0; d < node.dependencies.size(); ++d) {
-                        depHashes.push(
-                            _graph.nodes[node.dependencies[d]].contentHash);
-                    }
-                    String cacheKey = Cache::computeKey(
-                        node.content, targetName, {}, depHashes);
-
+                    // All String manipulation on shared state / nodes must be locked because String is non-atomic COW.
+                    String cacheKey;
                     bool cachedHit = false;
                     String cachedPath;
-                    {
-                        std::lock_guard<std::mutex> lock(stateMutex);
-                        if (!node.path.endsWith("sew_bridge.cpp") && !node.path.endsWith("sew_bridge.js") && onCacheHas && onCacheHas(cacheKey)) {
-                            cachedHit = true;
-                            if (onProgress) {
-                                compiled++;
-                                onProgress("Cached", compiled, totalNodes);
-                            }
-                            cachedPath = onCacheGet(cacheKey);
-                        }
-                    }
-
-                    if (cachedHit) {
-                        CompileResult res;
-                        res.outputPath = cachedPath;
-                        res.success = true;
-                        
-                        std::lock_guard<std::mutex> lock(stateMutex);
-                        allResults.push(Xi::Move(res));
-                        node.compiled = true;
-                        continue;
-                    }
-
-                    if (node.path.endsWith("sew_bridge.cpp")) {
-                        FILE* f = fopen(node.path.c_str(), "w");
-                        if (f) {
-                            fwrite(node.content.data(), 1, node.content.size(), f);
-                            fclose(f);
-                        }
-                    }
-                    if (node.path.endsWith("sew_bridge.js")) {
-                        FILE* f = fopen(node.path.c_str(), "w");
-                        if (f) {
-                            fwrite(node.content.data(), 1, node.content.size(), f);
-                            fclose(f);
-                        }
-                    }
-
-                    Language** langPtr = nullptr;
-                    {
-                        std::lock_guard<std::mutex> lock(stateMutex);
-                        langPtr = _langsByName.get(node.language);
-                    }
-                    if (!langPtr) continue;
-
+                    Language* lang = nullptr;
                     CompileRequest req;
-                    req.sourcePath = node.path;
-                    req.sourceContent = node.content;
-                    req.form = node.form;
-                    req.targetTriple = target->triple();
-                    req.assetsDir = assetsDir;
-                    if (outputPath.endsWith(".so")) {
-                        req.flags.push("-fPIC");
-                    }
-                    for (usz k = 0; k < includePaths.size(); ++k) {
-                        req.includePaths.push(includePaths[k]);
-                    }
-                    for (usz k = 0; k < _inferredIncludeRoots.size(); ++k) {
-                        req.includePaths.push(_inferredIncludeRoots[k]);
-                    }
-
-                    String outPath = node.path;
-                    if (node.language == "cpp" || node.language == "c" || node.form == CompileForm::Bytecode) {
-                        String safePath = node.path;
-                        safePath = safePath.replace("/", "_");
-                        safePath = safePath.replace("\\", "_");
-                        
-                        long long dotPos = -1;
-                        for (usz k = 0; k < safePath.size(); ++k) {
-                            if (safePath.data()[k] == '.') dotPos = (long long)k;
-                        }
-                        if (dotPos >= 0) {
-                            safePath = safePath.substring(0, (usz)dotPos);
-                        }
-                        outPath = tempDir + "/sew_obj_" + safePath + ".o";
-                    }
-                    req.outputPath = outPath;
-
-
-
-                    CompileResult res = (*langPtr)->compile(req);
-
-
-
-                    if (!res.success) {
-                        std::lock_guard<std::mutex> lock(stateMutex);
-                        stepSuccess = false;
-                        stepErrors = "Failed to compile " + node.path + ": " + res.errors;
-                        break;
-                    }
+                    bool skip = false;
+                    bool isBridgeCpp = false;
+                    bool isBridgeJs = false;
+                    String nodePath;
+                    String nodeContent;
 
                     {
                         std::lock_guard<std::mutex> lock(stateMutex);
-                        if (!node.path.endsWith("sew_bridge.cpp") && onCacheSet && res.outputPath.length() > 0) {
+                        if (node.compiled) {
+                            skip = true;
+                        } else {
+                            nodePath = node.path;
+                            nodeContent = node.content;
+
+                            String ext;
+                            long long lastDot = -1;
+                            for (usz k = 0; k < nodePath.size(); ++k) {
+                                if (nodePath.data()[k] == '.') lastDot = (long long)k;
+                            }
+                            if (lastDot >= 0) ext = nodePath.substring((usz)lastDot);
+                            if (ext == ".h" || ext == ".hpp" || ext == ".hxx") {
+                                node.compiled = true;
+                                compiled++;
+                                skip = true;
+                            } else if (isRepl && (node.language == "cpp" || node.language == "c")) {
+                                bool isGenerated = nodePath.endsWith("sew_bridge.cpp") || nodePath.endsWith("sew_qjs_bindings.cpp");
+                                if (!isGenerated) {
+                                    node.compiled = true;
+                                    compiled++;
+                                    skip = true;
+                                }
+                            }
+
+                            if (!skip) {
+                                isBridgeCpp = nodePath.endsWith("sew_bridge.cpp");
+                                isBridgeJs = nodePath.endsWith("sew_bridge.js");
+
+                                // Check cache
+                                String contentHash = node.contentHash;
+                                Array<String> depHashes;
+                                for (usz d = 0; d < node.dependencies.size(); ++d) {
+                                    depHashes.push(_graph.nodes[node.dependencies[d]].contentHash);
+                                }
+                                bool isPic = outputPath.endsWith(".so");
+                                cacheKey = Cache::computeKey(
+                                    nodeContent + (isPic ? ":fPIC" : ""), targetName, {}, depHashes);
+
+                                if (onCacheHas && onCacheHas(cacheKey)) {
+                                    cachedHit = true;
+                                    compiled++;
+                                    if (onProgress) {
+                                        onProgress("Cached", compiled, totalNodes);
+                                    }
+                                    cachedPath = onCacheGet(cacheKey);
+                                    
+                                    CompileResult res;
+                                    res.outputPath = cachedPath;
+                                    res.success = true;
+                                    allResults.push(Xi::Move(res));
+                                    node.compiled = true;
+                                    skip = true;
+                                } else {
+                                    Language** langPtr = _langsByName.get(node.language);
+                                    if (langPtr) {
+                                        lang = *langPtr;
+                                        
+                                        req.sourcePath = nodePath;
+                                        req.sourceContent = nodeContent;
+                                        req.form = node.form;
+                                        req.targetTriple = target->triple();
+                                        req.assetsDir = assetsDir;
+                                        if (isPic) {
+                                            req.flags.push("-fPIC");
+                                        }
+                                        for (usz k = 0; k < includePaths.size(); ++k) {
+                                            req.includePaths.push(includePaths[k]);
+                                        }
+                                        for (usz k = 0; k < _inferredIncludeRoots.size(); ++k) {
+                                            req.includePaths.push(_inferredIncludeRoots[k]);
+                                        }
+                                        if (nodePath.indexOf("sew_qjs_bindings.cpp") != (usz)-1) {
+                                            char pathBuf[1024];
+                                            ssize_t len = ::readlink("/proc/self/exe", pathBuf, sizeof(pathBuf) - 1);
+                                            if (len != -1) {
+                                                pathBuf[len] = '\0';
+                                                char* lastSlash = strrchr(pathBuf, '/');
+                                                if (lastSlash) {
+                                                    *lastSlash = '\0';
+                                                    String execDir(pathBuf);
+                                                    String qjsPath = execDir + "/_deps/quickjs_src-src";
+                                                    struct stat st;
+                                                    if (::stat(qjsPath.c_str(), &st) != 0) {
+                                                        qjsPath = execDir + "/../thirdparty/quickjs";
+                                                    }
+                                                    req.includePaths.push(qjsPath);
+                                                }
+                                            }
+                                        }
+
+                                        String outPath = nodePath;
+                                        if (node.language == "cpp" || node.language == "c" || node.form == CompileForm::Bytecode) {
+                                            String safePath = nodePath;
+                                            safePath = safePath.replace("/", "_");
+                                            safePath = safePath.replace("\\", "_");
+                                            safePath = safePath.replace(".", "_");
+                                            outPath = tempDir + "/sew_obj_" + safePath + ".o";
+                                        }
+                                        req.outputPath = outPath;
+                                    } else {
+                                        skip = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (skip) continue;
+
+                    if (isBridgeCpp || isBridgeJs) {
+                        FILE* f = fopen(nodePath.c_str(), "w");
+                        if (f) {
+                            fwrite(nodeContent.data(), 1, nodeContent.size(), f);
+                            fclose(f);
+                        }
+                    }
+
+                    if (!lang) continue;
+
+                    CompileResult res = lang->compile(req);
+
+                    {
+                        std::lock_guard<std::mutex> lock(stateMutex);
+                        if (!res.success) {
+                            stepSuccess = false;
+                            stepErrors = "Failed to compile " + nodePath + ": " + res.errors;
+                            break;
+                        }
+
+                        if (onCacheSet && res.outputPath.length() > 0) {
                             onCacheSet(cacheKey, res.outputPath);
                         }
 
@@ -833,7 +923,6 @@ bool Engine::build(const String& targetName) {
     }
 
     // Link
-    if (onInfo) onInfo("Linking...");
 
     LinkRequest linkReq;
     linkReq.units = Xi::Move(allResults);

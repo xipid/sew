@@ -190,6 +190,8 @@ static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, J
 
 // --- JS Implementation ---
 
+Array<String> g_realArgs;
+
 JS::JS() {
     if (sew_global_ctx) {
         _ctx = sew_global_ctx;
@@ -211,6 +213,18 @@ JS::JS() {
     ::JSValue console = JS_NewObject(_ctx);
     JS_SetPropertyStr(_ctx, console, "log", JS_NewCFunction(_ctx, js_console_log, "log", 1));
     JS_SetPropertyStr(_ctx, global_obj, "console", console);
+
+    // Register scriptArgs and process.argv
+    ::JSValue args_arr = JS_NewArray(_ctx);
+    JS_SetPropertyUint32(_ctx, args_arr, 0, JS_NewString(_ctx, "sew"));
+    for (usz i = 0; i < g_realArgs.size(); ++i) {
+        JS_SetPropertyUint32(_ctx, args_arr, i + 1, JS_NewString(_ctx, g_realArgs[i].c_str()));
+    }
+    JS_SetPropertyStr(_ctx, global_obj, "scriptArgs", JS_DupValue(_ctx, args_arr));
+    ::JSValue process_obj = JS_NewObject(_ctx);
+    JS_SetPropertyStr(_ctx, process_obj, "argv", args_arr);
+    JS_SetPropertyStr(_ctx, global_obj, "process", process_obj);
+
     JS_FreeValue(_ctx, global_obj);
 }
 
