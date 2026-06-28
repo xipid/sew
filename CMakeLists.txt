@@ -137,7 +137,8 @@ set_target_properties(test_hotreloading PROPERTIES
 
 # --- CLI Tool ---
 add_executable(sew src/main.cpp)
-target_link_libraries(sew PRIVATE SewLib)
+target_link_libraries(sew PRIVATE -Wl,--whole-archive SewLib -Wl,--no-whole-archive)
+set_target_properties(sew PROPERTIES LINK_FLAGS "-Wl,-export-dynamic")
 set_target_properties(sew PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 if(EXISTS "/home/xi/.gemini/antigravity/brain/8f46d962-8582-4335-9d80-910ea9fb462b/scratch/debug_parser.cpp")

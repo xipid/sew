@@ -119,9 +119,8 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
         boot += "#include <cstring>\n";
         boot += "#include <cstdint>\n\n";
 
-        // Embed QuickJS C bindings
-        boot += req.quickjsBindings;
-        boot += "\n";
+        // Declare QuickJS C bindings
+        boot += "extern \"C\" void register_sew_native_bindings(JSContext *ctx, JSValue native_obj);\n\n";
 
         // Embed bytecodes for each JS unit
         for (usz idx : jsUnitIndices) {
@@ -333,6 +332,10 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
     Process p;
     p.file = "clang++";
     p.arg.push("-fuse-ld=mold");
+    if (isShared) {
+        p.arg.push("-shared");
+        p.arg.push("-fPIC");
+    }
 
     // Target triple
     if (_triple.length() > 0) {

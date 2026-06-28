@@ -15,3 +15,7 @@
     * [Native Compilation](5-amd-building/native-compilation.md)
 * [WebAssembly](6-webassembly/README.md)
     * [TypeScript Generation](6-webassembly/typescript-generation.md)
+* [REPL](7-repl/README.md)
+    * [Usage & Interactive Mode](7-repl/usage.md)
+    * [Integration & Native Libraries](7-repl/integration.md)
+

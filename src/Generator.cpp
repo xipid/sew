@@ -2515,13 +2515,11 @@ String BindingGenerator::generateJsGlue(const Array<ParsedClass>& classes,
         // Track ternary depth
         if (c == '?' && i + 1 < len && ts.data()[i+1] != '.' && ts.data()[i+1] != '?') {
             ternaryDepth++;
-            fprintf(stderr, "[DEBUG QUESTION] ternaryDepth=%d at i=%d\n", ternaryDepth, (int)i);
         }
         
         // Check for type annotation
         if (c == ':') {
             if (ternaryDepth > 0) {
-                fprintf(stderr, "[DEBUG COLON] skipped because ternaryDepth=%d at i=%d\n", ternaryDepth, (int)i);
                 ternaryDepth--;
                 js.push(':');
                 continue;
@@ -2567,7 +2565,6 @@ String BindingGenerator::generateJsGlue(const Array<ParsedClass>& classes,
             }
             if (j > startType && j < len && (ts.data()[j] == ',' || ts.data()[j] == ')' || ts.data()[j] == '{' || ts.data()[j] == ';' || ts.data()[j] == '\n' || ts.data()[j] == '=')) {
                 String typeName = ts.substring(startType, j).trim();
-                fprintf(stderr, "[DEBUG STRIP] typeName='%s' isKnown=%d nextC='%c'\n", typeName.c_str(), isKnownType(typeName, classes), ts.data()[j]);
                 if (isKnownType(typeName, classes)) {
                     i = j - 1;
                     continue;

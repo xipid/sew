@@ -175,6 +175,19 @@ static JSModuleDef *js_module_loader(JSContext *ctx, const char *module_name, vo
     return nullptr;
 }
 
+static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    for (int i = 0; i < argc; ++i) {
+        if (i > 0) printf(" ");
+        const char *str = JS_ToCString(ctx, argv[i]);
+        if (str) {
+            printf("%s", str);
+            JS_FreeCString(ctx, str);
+        }
+    }
+    printf("\n");
+    return JS_UNDEFINED;
+}
+
 // --- JS Implementation ---
 
 JS::JS() {
@@ -191,6 +204,14 @@ JS::JS() {
         // Set custom module loaders
         JS_SetModuleLoaderFunc(_rt, js_module_normalize, js_module_loader, this);
     }
+    
+    // Register console.log
+    ::JSValue global_obj = JS_GetGlobalObject(_ctx);
+    JS_SetPropertyStr(_ctx, global_obj, "globalThis", JS_DupValue(_ctx, global_obj));
+    ::JSValue console = JS_NewObject(_ctx);
+    JS_SetPropertyStr(_ctx, console, "log", JS_NewCFunction(_ctx, js_console_log, "log", 1));
+    JS_SetPropertyStr(_ctx, global_obj, "console", console);
+    JS_FreeValue(_ctx, global_obj);
 }
 
 JS::~JS() {
@@ -200,6 +221,21 @@ JS::~JS() {
 
 JsValue JS::eval(const String& code) {
     ::JSValue res = JS_Eval(_ctx, code.c_str(), code.size(), "<eval>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(res)) {
+        ::JSValue exception = JS_GetException(_ctx);
+        const char* str = JS_ToCString(_ctx, exception);
+        fprintf(stderr, "JS Runtime Error: %s\n", str);
+        JS_FreeCString(_ctx, str);
+        
+        ::JSValue stack = JS_GetPropertyStr(_ctx, exception, "stack");
+        if (!JS_IsUndefined(stack)) {
+            const char* stackStr = JS_ToCString(_ctx, stack);
+            fprintf(stderr, "%s\n", stackStr);
+            JS_FreeCString(_ctx, stackStr);
+        }
+        JS_FreeValue(_ctx, stack);
+        JS_FreeValue(_ctx, exception);
+    }
     return JsValue(_ctx, res);
 }
 

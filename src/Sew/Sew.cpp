@@ -146,6 +146,9 @@ String Engine::detectLanguage(const String& path) const {
     if (lastDot < 0) return "";
 
     String ext = path.substring((usz)lastDot);
+    if (ext == ".a" || ext == ".so" || ext == ".dylib" || ext == ".dll") {
+        return "lib";
+    }
     Language* lang = languageFor(ext);
     return lang ? lang->name() : "";
 }
@@ -227,10 +230,11 @@ void Engine::discoverFile(const String& rawPath) {
         }
     }
 
-    // Get language and parse imports
     Language** langPtr = _langsByName.get(langName);
     if (!langPtr) return;
     Language* lang = *langPtr;
+
+
 
     Array<ImportSpec> imports = lang->parseImports(content, path);
 
@@ -299,6 +303,35 @@ void Engine::find() {
 
             usz nodeIdx = _graph.addNode(path, langName);
             _graph.nodes[nodeIdx].content = _inputs[i].content;
+
+            // If it's a C++ header file, infer and register its include root
+            String ext;
+            long long lastDot = -1;
+            for (usz k = 0; k < path.size(); ++k) {
+                if (path.data()[k] == '.') lastDot = (long long)k;
+            }
+            if (lastDot >= 0) ext = path.substring((usz)lastDot);
+            if (langName == "cpp" && (ext == ".h" || ext == ".hpp" || ext == ".hxx")) {
+                String includeRoot = inferIncludeRoot(path);
+                if (!includeRoot.isEmpty()) {
+                    Language** langPtr = _langsByName.get("cpp");
+                    if (langPtr) {
+                        Languages::CppLanguage* cppLang = dynamic_cast<Languages::CppLanguage*>(*langPtr);
+                        if (cppLang) {
+                            bool exists = false;
+                            for (usz j = 0; j < cppLang->preprocessor().includePaths.size(); ++j) {
+                                if (cppLang->preprocessor().includePaths[j] == includeRoot) {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                cppLang->preprocessor().includePaths.push(includeRoot);
+                            }
+                        }
+                    }
+                }
+            }
 
             // Parse imports
             Language** langPtr = _langsByName.get(langName);
@@ -371,12 +404,6 @@ void Engine::find() {
             }
             Languages::PreprocessorResult ppResult = preprocessor.process(node.content, node.path);
             parser.parse(ppResult.strippedSource);
-            for (const auto& cls : parser.classes) {
-                fprintf(stderr, "[PARSED CLASS] File: %s, Class: %s\n", node.path.c_str(), cls.name.c_str());
-                for (const auto& f : cls.fields) {
-                    fprintf(stderr, "  [FIELD] %s : %s\n", f.name.c_str(), f.type.c_str());
-                }
-            }
             String headerPath = canonicalize(node.path);
             if (headerPath.isEmpty()) headerPath = node.path;
             headerPathsForParse.push(headerPath);
@@ -384,9 +411,11 @@ void Engine::find() {
             if (!includeRoot.isEmpty() && !containsPath(_inferredIncludeRoots, includeRoot)) {
                 _inferredIncludeRoots.push(includeRoot);
             }
-            Array<String> siblings = preprocessor.findSiblingSourceFiles(headerPath);
-            for (usz s = 0; s < siblings.size(); ++s) {
-                discoverFile(siblings[s]);
+            if (!isRepl) {
+                Array<String> siblings = preprocessor.findSiblingSourceFiles(headerPath);
+                for (usz s = 0; s < siblings.size(); ++s) {
+                    discoverFile(siblings[s]);
+                }
             }
             // Only add to bridge #includes if this was an explicit user input
             if (explicitInputPaths.has(headerPath)) {
@@ -431,22 +460,44 @@ void Engine::find() {
             }
         }
 
-        // Generate TS glue and store it
-        _generatedTsGlue = BindingGenerator::generateTsGlue(parser.classes, parser.functions, wasmName);
+        // Add sew_qjs_bindings.cpp and sew_bridge.js only if JS target is involved or isRepl is true
+        bool hasJs = false;
+        for (usz i = 0; i < _graph.nodes.size(); ++i) {
+            if (_graph.nodes[i].language == "js") {
+                hasJs = true;
+                break;
+            }
+        }
 
-        // Generate JS glue and store it
-        _generatedJsGlue = BindingGenerator::generateJsGlue(parser.classes, parser.functions);
+        if (hasJs || isRepl) {
+            // Generate TS glue and store it
+            _generatedTsGlue = BindingGenerator::generateTsGlue(parser.classes, parser.functions, wasmName);
 
-        // Generate QuickJS bindings and store it
-        _generatedQuickjsBindings = BindingGenerator::generateQuickjsBindings(parser.classes, parser.functions);
+            // Generate JS glue and store it
+            _generatedJsGlue = BindingGenerator::generateJsGlue(parser.classes, parser.functions);
 
-        // Add sew_bridge.js to graph
-        String jsGluePath = tempDir + "/sew_bridge.js";
-        usz jsGlueIdx = _graph.addNode(jsGluePath, "js");
-        _graph.nodes[jsGlueIdx].content = _generatedJsGlue;
+            // Generate QuickJS bindings and store it
+            _generatedQuickjsBindings = BindingGenerator::generateQuickjsBindings(parser.classes, parser.functions);
 
-        // Make sew_bridge.js depend on sew_bridge.cpp
-        _graph.addEdge(jsGlueIdx, bridgeIdx);
+            // Add sew_bridge.js to graph
+            String jsGluePath = tempDir + "/sew_bridge.js";
+            usz jsGlueIdx = _graph.addNode(jsGluePath, "js");
+            _graph.nodes[jsGlueIdx].content = _generatedJsGlue;
+
+            // Make sew_bridge.js depend on sew_bridge.cpp
+            _graph.addEdge(jsGlueIdx, bridgeIdx);
+
+            // Add sew_qjs_bindings.cpp to graph
+            String qjsBindingsPath = tempDir + "/sew_qjs_bindings.cpp";
+            usz qjsIdx = _graph.addNode(qjsBindingsPath, "cpp");
+            _graph.nodes[qjsIdx].content = _generatedQuickjsBindings;
+
+            // Make sew_qjs_bindings.cpp depend on all headers
+            for (usz h = 0; h < headerPathsForParse.size(); ++h) {
+                usz hIdx = _graph.indexOf(headerPathsForParse[h]);
+                if (hIdx != (usz)-1) _graph.addEdge(qjsIdx, hIdx);
+            }
+        }
     }
 
     // Auto-discover Xylem core sources if xylem is imported
@@ -500,6 +551,11 @@ bool Engine::build(const String& targetName) {
     }
 
     String tempDir = getTempDir();
+
+    Map<String, bool> explicitInputPaths;
+    for (usz i = 0; i < _inputs.size(); ++i) {
+        explicitInputPaths.set(canonicalize(_inputs[i].name), true);
+    }
 
     // Assign compile forms based on target and precompute content hashes
     for (usz i = 0; i < _graph.nodes.size(); ++i) {
@@ -635,6 +691,17 @@ bool Engine::build(const String& targetName) {
                         continue;
                     }
 
+                    if (isRepl && (node.language == "cpp" || node.language == "c")) {
+                        bool isExplicit = explicitInputPaths.has(canonicalize(node.path));
+                        bool isGenerated = node.path.endsWith("sew_bridge.cpp") || node.path.endsWith("sew_qjs_bindings.cpp");
+                        if (!isExplicit && !isGenerated) {
+                            std::lock_guard<std::mutex> lock(stateMutex);
+                            node.compiled = true;
+                            compiled++;
+                            continue;
+                        }
+                    }
+
                     // Check cache
                     String contentHash = node.contentHash;
                     Array<String> depHashes;
@@ -698,6 +765,9 @@ bool Engine::build(const String& targetName) {
                     req.form = node.form;
                     req.targetTriple = target->triple();
                     req.assetsDir = assetsDir;
+                    if (outputPath.endsWith(".so")) {
+                        req.flags.push("-fPIC");
+                    }
                     for (usz k = 0; k < includePaths.size(); ++k) {
                         req.includePaths.push(includePaths[k]);
                     }
@@ -769,6 +839,16 @@ bool Engine::build(const String& targetName) {
     LinkRequest linkReq;
     linkReq.units = Xi::Move(allResults);
 
+    // Add precompiled library archives/shared libraries to LinkRequest
+    for (usz i = 0; i < _graph.nodes.size(); ++i) {
+        if (_graph.nodes[i].language == "lib") {
+            CompileResult libRes;
+            libRes.outputPath = _graph.nodes[i].path;
+            libRes.success = true;
+            linkReq.units.push(Xi::Move(libRes));
+        }
+    }
+
     linkReq.outputPath = outputPath;
     linkReq.assetsDir = assetsDir;
     linkReq.tsGlue = _generatedTsGlue;
@@ -836,7 +916,11 @@ bool Engine::build(const String& targetName) {
 
 void Engine::eval(const String& language) {
     if (!_evalCtx.hasContext()) {
-        _evalCtx.init(language);
+        String soPath = "";
+        if (outputPath.endsWith(".so") && ::access(outputPath.c_str(), 0) == 0) {
+            soPath = outputPath;
+        }
+        _evalCtx.init(language, soPath, _generatedJsGlue);
     }
 }
 

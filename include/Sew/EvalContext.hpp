@@ -17,7 +17,7 @@ using namespace Collection;
 class EvalContext {
 public:
     /// Initialize the runtime for a given language ("js", "py", "cpp").
-    void init(const String& language);
+    void init(const String& language, const String& soPath = "", const String& jsGlue = "");
 
     /// Evaluate code and return output. Each call is a fresh invocation.
     String eval(const String& code);
@@ -32,6 +32,8 @@ private:
     String _language;
     bool _initialized = false;
     void* _cppProcess = nullptr;
+    void* _jsContext = nullptr;
+    void* _soHandle = nullptr;
 };
 
 } // namespace Sew

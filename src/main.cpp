@@ -31,6 +31,8 @@
 #include <sys/stat.h>
 #include <glob.h>
 #include <dirent.h>
+#include <iostream>
+#include <string>
 
 using namespace Sew;
 using namespace Sew::Languages;
@@ -82,6 +84,80 @@ static void writeFile(const String& path, const String& content) {
 static bool fileExists(const String& path) {
     struct stat st;
     return ::stat(path.c_str(), &st) == 0;
+}
+
+static String canonicalizePath(const String& path) {
+    char* rp = ::realpath(path.c_str(), nullptr);
+    if (rp) {
+        String res(rp);
+        ::free(rp);
+        return res;
+    }
+    return path;
+}
+
+static String findPrecompiledLibrary(const String& headerPath) {
+    String path = canonicalizePath(headerPath);
+    if (path.isEmpty()) path = headerPath;
+    long long lastSlash = -1;
+    for (usz i = 0; i < path.size(); ++i) {
+        if (path.data()[i] == '/') lastSlash = (long long)i;
+    }
+    if (lastSlash < 0) return "";
+    String dir = path.substring(0, (usz)lastSlash);
+    
+    for (int level = 0; level < 4; ++level) {
+        String buildDir = dir + "/build";
+        struct stat st;
+        if (::stat(buildDir.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            long long dirSlash = -1;
+            for (usz i = 0; i < dir.size(); ++i) {
+                if (dir.data()[i] == '/') dirSlash = (long long)i;
+            }
+            String dirName = (dirSlash >= 0) ? dir.substring((usz)dirSlash + 1) : "";
+            if (!dirName.isEmpty()) {
+                String candidate1 = buildDir + "/lib" + dirName + ".a";
+                if (::stat(candidate1.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                    return candidate1;
+                }
+                DIR* d = ::opendir(buildDir.c_str());
+                if (d) {
+                    struct dirent* entry;
+                    while ((entry = ::readdir(d)) != nullptr) {
+                        String name = entry->d_name;
+                        if (name.endsWith(".a") && name.startsWith("lib") && name.indexOf("test") < 0) {
+                            String result = buildDir + "/" + name;
+                            ::closedir(d);
+                            return result;
+                        }
+                    }
+                    ::closedir(d);
+                }
+            }
+        }
+        
+        long long parentSlash = -1;
+        for (usz i = 0; i < dir.size(); ++i) {
+            if (dir.data()[i] == '/') parentSlash = (long long)i;
+        }
+        if (parentSlash < 0) break;
+        dir = dir.substring(0, (usz)parentSlash);
+    }
+    return "";
+}
+
+static String stripImports(const String& code) {
+    Array<String> lines = code.split("\n");
+    String result;
+    for (usz i = 0; i < lines.size(); ++i) {
+        String line = lines[i];
+        String trimmed = line.trim();
+        if (trimmed.startsWith("import ") || trimmed.startsWith("import{") || (trimmed.startsWith("import") && trimmed.indexOf("from") >= 0)) {
+            continue;
+        }
+        result += line + "\n";
+    }
+    return result;
 }
 
 static bool containsPath(const Array<String>& paths, const String& path) {
@@ -297,6 +373,20 @@ int main(int argc, char** argv) {
     Array<String> patterns = args.commands();
     Array<String> sources = expandInputPatterns(patterns);
 
+    String scriptFile;
+    if (target.length() == 0) {
+        if (stdinLang.length() == 0 && sources.size() > 0) {
+            for (usz i = 0; i < sources.size(); ++i) {
+                if (sources[i].endsWith(".js") || sources[i].endsWith(".py")) {
+                    scriptFile = sources[i];
+                    stdinLang = sources[i].endsWith(".js") ? "js" : "py";
+                    sources.splice(i, 1);
+                    break;
+                }
+            }
+        }
+    }
+
     if (target == "js") {
         String xylemRoot;
         for (usz i = 0; i < sources.size(); ++i) {
@@ -339,7 +429,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!quiet) fprintf(stderr, "Sew v1\n\n");
+    if (!quiet && (stdinLang.length() == 0 || target.length() > 0)) fprintf(stderr, "Sew v1\n\n");
 
     i64 startTime = millis();
 
@@ -496,42 +586,141 @@ int main(int argc, char** argv) {
         if (!quiet) Success("Output: " + outPath);
     };
 
-    if (!quiet) {
+    if (!quiet && (stdinLang.length() == 0 || target.length() > 0)) {
         sew.onInfo = [](String msg) { Info(msg); };
         sew.onWarn = [](String msg) { Warn(msg); };
         sew.onError = [](String msg) { Error(msg); };
     }
 
-    sew.assetsDir = assets;
-    sew.outputPath = output;
-
-    // ─── Run Mode (Eval) ────────────────────────────────────────────────
+    // ─── Run Mode (Eval / REPL) ─────────────────────────────────────────
 
     if (stdinLang.length() > 0 && target.length() == 0) {
-        if (!quiet) Info("Eval Mode: " + stdinLang);
+        quiet = true;
+        bool runQuiet = true;
+
+        sew.isRepl = true;
+        ::setenv("SEW_NO_SIBLINGS", "1", 1);
+
+        String exePath = argv[0];
+        long long lastSlash = -1;
+        for (usz i = 0; i < exePath.size(); ++i) {
+            if (exePath.data()[i] == '/') lastSlash = (long long)i;
+        }
+        String exeDir = (lastSlash >= 0) ? exePath.substring(0, (usz)lastSlash) : ".";
+        String qjsInclude = exeDir + "/_deps/quickjs_src-src";
+        sew.includePaths.push(qjsInclude);
+
+        // Read all inputs: piped stdin code (if not a TTY) and script file content
+        String pipedCode;
+        if (!::isatty(STDIN_FILENO)) {
+            u8 buf[4096];
+            for (;;) {
+                ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+                if (n <= 0) break;
+                for (ssize_t i = 0; i < n; ++i)
+                    pipedCode.push(buf[i]);
+            }
+        }
+
+        String scriptCode;
+        if (!scriptFile.isEmpty()) {
+            scriptCode = readFile(scriptFile);
+            if (scriptCode.isEmpty()) {
+                Error("Cannot read: " + scriptFile);
+                return 1;
+            }
+        }
+
+        // Input piped code or script code if they exist so dependency discovery works
+        if (pipedCode.length() > 0) {
+            sew.input("stdin.js", pipedCode);
+        } else if (scriptCode.length() > 0) {
+            sew.input(scriptFile, scriptCode);
+        }
+
+        // Input explicit source files (C++ headers/sources remaining in sources)
+        for (usz i = 0; i < sources.size(); ++i) {
+            String content = readFile(sources[i]);
+            if (content.isEmpty()) {
+                Error("Cannot read: " + sources[i]);
+                return 1;
+            }
+            sew.input(sources[i], content);
+        }
+
+        // Perform dependency discovery to construct the initial graph
+        sew.find();
+
+        // Scan the graph nodes for C++ headers and auto-discover libraries
+        bool hasCppHeaders = false;
+        Array<String> discoveredLibs;
+        for (usz i = 0; i < sew.graph().nodes.size(); ++i) {
+            String path = sew.graph().nodes[i].path;
+            if (path.endsWith(".h") || path.endsWith(".hpp") || path.endsWith(".hxx")) {
+                hasCppHeaders = true;
+                String libPath = findPrecompiledLibrary(path);
+                if (!libPath.isEmpty() && !containsPath(discoveredLibs, libPath)) {
+                    discoveredLibs.push(libPath);
+                }
+            }
+        }
+
+        // Input discovered libraries and re-run find() to integrate them into the DAG
+        if (discoveredLibs.size() > 0) {
+            for (usz i = 0; i < discoveredLibs.size(); ++i) {
+                sew.input(discoveredLibs[i], "");
+            }
+            sew.find();
+        }
+
+        // If there are C++ headers to bind, compile the bindings
+        if (hasCppHeaders) {
+            if (!runQuiet) Info("Compiling C++ sources for REPL environment...");
+            if (sew.outputPath.isEmpty()) {
+                sew.outputPath = "/tmp/sew_repl.so";
+            }
+            if (!sew.build("amd")) {
+                Error("Failed to compile C++ library bindings for REPL.");
+                return 1;
+            }
+        }
+
+        if (!runQuiet) Info("Eval Mode: " + stdinLang);
 
         sew.eval(stdinLang);
 
-        // Read from stdin
-        String code;
-        u8 buf[4096];
-        for (;;) {
-            ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
-            if (n <= 0) break;
-            for (ssize_t i = 0; i < n; ++i)
-                code.push(buf[i]);
+        // Run the script file or piped code first
+        if (scriptCode.length() > 0) {
+            sew.evalCode(stripImports(scriptCode));
+        } else if (pipedCode.length() > 0) {
+            sew.evalCode(stripImports(pipedCode));
         }
 
-        if (code.length() > 0) {
-            String result = sew.evalCode(code);
-            if (result.length() > 0) {
-                ::write(STDOUT_FILENO, result.data(), result.size());
+        // Start the interactive prompt if input is a TTY and either --stdin was requested or no script was supplied
+        bool startInteractive = ::isatty(STDIN_FILENO) && (args.flag("--stdin").active || scriptFile.isEmpty());
+
+        if (startInteractive) {
+            printf("\n\033[38;2;0;210;255m\033[1mSew REPL (%s)\033[0m\n", stdinLang.c_str());
+            printf("Type expressions and press Enter. Press Ctrl+D to exit.\n\n");
+            std::string line;
+            for (;;) {
+                printf("sew> ");
+                fflush(stdout);
+                if (!std::getline(std::cin, line)) {
+                    printf("\n");
+                    break;
+                }
+                if (line.empty()) continue;
+                String result = sew.evalCode(stripImports(line.c_str()));
+                if (result.length() > 0) {
+                    printf("%s\n", result.c_str());
+                }
             }
         }
 
         i64 elapsed = millis() - startTime;
         if (!quiet) {
-            fprintf(stderr, "Eval took %lld ms\n", (long long)elapsed);
+            fprintf(stderr, "Eval session took %lld ms\n", (long long)elapsed);
         }
 
         goto cleanup;

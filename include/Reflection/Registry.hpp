@@ -2,6 +2,7 @@
 #include <Reflection/Type.hpp>
 #include <Collection/Map.hpp>
 #include <Xi/Func.hpp>
+#include <atomic>
 
 namespace Sew { namespace Reflect {
 
@@ -44,14 +45,33 @@ public:
         return s_has;
     }
 
+    static std::atomic<usz>& redirectionVersion() {
+        static std::atomic<usz> s_ver(0);
+        return s_ver;
+    }
+
     static usz resolvePointer(usz addr) {
         if (!hasRedirections() || addr == 0) return addr;
+
+        static thread_local usz s_lastInput = 0;
+        static thread_local usz s_lastResult = 0;
+        static thread_local usz s_lastVer = 0;
+
+        usz currentVer = redirectionVersion().load(std::memory_order_relaxed);
+        if (addr == s_lastInput && s_lastVer == currentVer) {
+            return s_lastResult;
+        }
+
         usz current = addr;
         for (int i = 0; i < 32; ++i) { // prevent infinite cycles in case of bugs
             usz* redirected = redirectionTable().get(current);
             if (!redirected) break;
             current = *redirected;
         }
+
+        s_lastInput = addr;
+        s_lastResult = current;
+        s_lastVer = currentVer;
         return current;
     }
 
@@ -81,6 +101,7 @@ public:
         // 3. Set the new redirect
         redirectionTable().set(oldAddr, finalAddr);
         hasRedirections() = true;
+        redirectionVersion().fetch_add(1, std::memory_order_relaxed);
     }
 
     static void registerOverride(usz instanceAddr, const String& methodName, Xi::Func<void*(void*, void*)> func) {

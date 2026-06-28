@@ -5,12 +5,14 @@
 
 #include <Sew/EvalContext.hpp>
 #include <System/Process.hpp>
+#include <Languages/JS/JS.hpp>
+#include <dlfcn.h>
 
 namespace Sew {
 
 using namespace System;
 
-void EvalContext::init(const String& language) {
+void EvalContext::init(const String& language, const String& soPath, const String& jsGlue) {
     _language = language;
     _initialized = true;
 
@@ -18,8 +20,37 @@ void EvalContext::init(const String& language) {
         // C++ eval: start persistent clang++ process
         // (Compile to .so, dlopen pattern — future)
     }
-    // JS/Python: QuickJS/MicroPython initialization deferred to when
-    // those libraries are statically linked
+    
+    if (language == "js") {
+        auto* js = new Languages::JS();
+        _jsContext = js;
+
+        if (soPath.length() > 0) {
+            void* handle = ::dlopen(soPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+            _soHandle = handle;
+            if (handle) {
+                typedef void (*RegFn)(JSContext*, ::JSValue);
+                RegFn reg = (RegFn)::dlsym(handle, "register_sew_native_bindings");
+                if (reg) {
+                    JSContext* ctx = js->getCtx();
+                    ::JSValue global = JS_GetGlobalObject(ctx);
+                    ::JSValue nativeObj = JS_NewObject(ctx);
+                    
+                    reg(ctx, nativeObj);
+                    
+                    JS_SetPropertyStr(ctx, global, "sew_native_bindings", nativeObj);
+                    JS_SetPropertyStr(ctx, global, "__sew_native", JS_DupValue(ctx, nativeObj));
+                    JS_FreeValue(ctx, global);
+                }
+            }
+        }
+
+        if (jsGlue.length() > 0) {
+            // Strip export statements so standard evaluation succeeds
+            String strippedGlue = jsGlue.replace("export ", "");
+            js->eval(strippedGlue);
+        }
+    }
 }
 
 String EvalContext::eval(const String& code) {
@@ -66,8 +97,11 @@ String EvalContext::eval(const String& code) {
     }
 
     if (_language == "js") {
-        // QuickJS eval — to be connected when statically linked
-        return "JS eval not yet connected to QuickJS";
+        if (!_jsContext) return "Error: JS context not initialized";
+        auto* js = (Languages::JS*)_jsContext;
+        Languages::JsValue val = js->eval(code);
+        if (val.isUndefined()) return "";
+        return val.toString();
     }
 
     if (_language == "py") {
@@ -88,6 +122,14 @@ void EvalContext::destroy() {
         p->destroy();
         delete p;
         _cppProcess = nullptr;
+    }
+    if (_jsContext) {
+        delete (Languages::JS*)_jsContext;
+        _jsContext = nullptr;
+    }
+    if (_soHandle) {
+        ::dlclose(_soHandle);
+        _soHandle = nullptr;
     }
     _initialized = false;
 }

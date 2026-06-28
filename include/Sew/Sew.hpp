@@ -54,6 +54,7 @@ public:
     String assetsDir;
     String outputPath;
     Array<String> includePaths;
+    bool isRepl = false;
 
     // --- Pipeline ---
     void input(const String& name, const String& content);
