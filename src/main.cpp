@@ -592,6 +592,9 @@ int main(int argc, char** argv) {
         sew.onError = [](String msg) { Error(msg); };
     }
 
+    sew.assetsDir = assets;
+    sew.outputPath = output;
+
     // ─── Run Mode (Eval / REPL) ─────────────────────────────────────────
 
     if (stdinLang.length() > 0 && target.length() == 0) {
@@ -600,6 +603,13 @@ int main(int argc, char** argv) {
 
         sew.isRepl = true;
         ::setenv("SEW_NO_SIBLINGS", "1", 1);
+
+        String incs;
+        for (usz i = 0; i < sew.includePaths.size(); ++i) {
+            if (i > 0) incs += ":";
+            incs += sew.includePaths[i];
+        }
+        ::setenv("SEW_REPL_INCLUDES", incs.c_str(), 1);
 
         String exePath = argv[0];
         long long lastSlash = -1;

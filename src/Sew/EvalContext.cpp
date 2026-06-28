@@ -7,18 +7,28 @@
 #include <System/Process.hpp>
 #include <Languages/JS/JS.hpp>
 #include <dlfcn.h>
+#include <cstdlib>
+#include <string>
 
 namespace Sew {
 
 using namespace System;
+
+struct CppReplContext {
+    String headers;
+    String declarations;
+    usz stepCount = 0;
+};
 
 void EvalContext::init(const String& language, const String& soPath, const String& jsGlue) {
     _language = language;
     _initialized = true;
 
     if (language == "cpp") {
-        // C++ eval: start persistent clang++ process
-        // (Compile to .so, dlopen pattern — future)
+        _cppProcess = new CppReplContext();
+        if (soPath.length() > 0) {
+            _soHandle = ::dlopen(soPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+        }
     }
     
     if (language == "js") {
@@ -57,27 +67,65 @@ String EvalContext::eval(const String& code) {
     if (!_initialized) return "Error: eval context not initialized";
 
     if (_language == "cpp") {
-        // Write to temp file, compile as shared library, dlopen
-        // For now: spawn clang++ and execute
+        CppReplContext* ctx = (CppReplContext*)_cppProcess;
+        if (!ctx) return "Error: C++ REPL context not allocated";
+
+        String line = code.trim();
+        if (line.isEmpty()) return "";
+
+        if (line.startsWith("#include")) {
+            ctx->headers += line + "\n";
+            return "";
+        }
+
+        if (line.startsWith("struct ") || line.startsWith("class ") || line.startsWith("using ") || 
+            line.startsWith("template ") || line.startsWith("inline ") ||
+            (line.indexOf("(") >= 0 && line.indexOf(")") >= 0 && line.indexOf("{") >= 0)) {
+            ctx->declarations += code + "\n";
+            return "";
+        }
+
+        ctx->stepCount++;
+        String cppPath = "/tmp/sew_cpp_repl_step" + String(std::to_string(ctx->stepCount).c_str()) + ".cpp";
+        String soPath = "/tmp/sew_cpp_repl_step" + String(std::to_string(ctx->stepCount).c_str()) + ".so";
+
+        String src = "#include <cstdio>\n#include <iostream>\n";
+        src += ctx->headers;
+        src += "\n";
+        src += ctx->declarations;
+        src += "\n";
+        src += "extern \"C\" void sew_eval_step() {\n";
+        src += code;
+        src += "\n}\n";
+
+        FILE* f = fopen(cppPath.c_str(), "w");
+        if (f) {
+            fwrite(src.data(), 1, src.size(), f);
+            fclose(f);
+        }
+
         Process p;
         p.file = "clang++";
-        p.arg.push("-x");
-        p.arg.push("c++");
+        p.arg.push("-shared");
+        p.arg.push("-fPIC");
         p.arg.push("-std=c++17");
         p.arg.push("-o");
-        p.arg.push("/tmp/sew_eval");
-        p.arg.push("-");
+        p.arg.push(soPath);
+        p.arg.push(cppPath);
         p.arg.push("-fuse-ld=mold");
 
-        // Write source to stdin
-        String wrapped = "#include <cstdio>\nint main() {\n";
-        wrapped += code;
-        wrapped += "\nreturn 0;\n}\n";
-        p.stdin.push(wrapped);
+        const char* envIncs = ::getenv("SEW_REPL_INCLUDES");
+        if (envIncs) {
+            String incsStr(envIncs);
+            Array<String> parts = incsStr.split(":");
+            for (usz k = 0; k < parts.size(); ++k) {
+                if (!parts[k].isEmpty()) {
+                    p.arg.push("-I" + parts[k]);
+                }
+            }
+        }
 
         p.exec();
-        // Close stdin to signal EOF
-        p.stdin.destroy();
         p.wait();
 
         if (p.exitCode != 0) {
@@ -86,14 +134,20 @@ String EvalContext::eval(const String& code) {
             return err;
         }
 
-        // Run the compiled binary
-        Process run;
-        run.file = "/tmp/sew_eval";
-        run.wait();
+        void* handle = ::dlopen(soPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+        if (!handle) {
+            return "dlopen failed: " + String(::dlerror());
+        }
 
-        String output;
-        while (run.stdout.size() > 0) output += run.stdout.shift();
-        return output;
+        typedef void (*StepFn)();
+        StepFn fn = (StepFn)::dlsym(handle, "sew_eval_step");
+        if (!fn) {
+            ::dlclose(handle);
+            return "dlsym failed: " + String(::dlerror());
+        }
+
+        fn();
+        return "";
     }
 
     if (_language == "js") {
@@ -118,9 +172,13 @@ bool EvalContext::hasContext() const {
 
 void EvalContext::destroy() {
     if (_cppProcess) {
-        Process* p = (Process*)_cppProcess;
-        p->destroy();
-        delete p;
+        if (_language == "cpp") {
+            delete (CppReplContext*)_cppProcess;
+        } else {
+            Process* p = (Process*)_cppProcess;
+            p->destroy();
+            delete p;
+        }
         _cppProcess = nullptr;
     }
     if (_jsContext) {
