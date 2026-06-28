@@ -404,9 +404,17 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
         p.arg.push(getExecutableDir() + "/libSewLib.a");
         p.arg.push("-lm");
         p.arg.push("-ldl");
+        p.arg.push("-lX11");
+        p.arg.push("-lXrandr");
+        p.arg.push("-lXinerama");
+        p.arg.push("-lXcursor");
+        p.arg.push("-lXi");
+        p.arg.push("-lGL");
+        p.arg.push("-lvulkan");
     } else {
         p.arg.push("-Wl,--unresolved-symbols=ignore-all");
     }
+
 
     p.wait();
 

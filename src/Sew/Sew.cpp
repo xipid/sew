@@ -75,9 +75,9 @@ static String getTempDir() {
         return String(envTemp);
     }
 
-    char cwd[1024];
-    if (::getcwd(cwd, sizeof(cwd))) {
-        String tempDir = String(cwd) + "/.sew";
+    const char* home = ::getenv("HOME");
+    if (home && home[0] != '\0') {
+        String tempDir = String(home) + "/.sew";
         struct stat st;
         if (::stat(tempDir.c_str(), &st) != 0) {
             ::mkdir(tempDir.c_str(), 0700);
@@ -188,72 +188,29 @@ String Engine::resolveImport(const ImportSpec& imp, const String& currentFile) {
         return false;
     };
 
-    // 1. Walking up tree (%%include, %%node_modules, %%deps)
-    long long lastSlash = -1;
-    for (usz i = 0; i < currentFile.size(); ++i) {
-        if (currentFile.data()[i] == '/') lastSlash = (long long)i;
-    }
-    String currentDir;
-    if (lastSlash >= 0) {
-        currentDir = currentFile.substring(0, (usz)lastSlash);
-    } else {
-        char cwd[1024];
-        if (::getcwd(cwd, sizeof(cwd))) {
-            currentDir = cwd;
-        }
-    }
-
-    String checkDir = currentDir;
+    // 1. Walking up tree with wildcard includes and user includes
     bool found = false;
-    while (!checkDir.isEmpty()) {
-        checkDir = canonicalize(checkDir);
-        
-        if (checkCandidate(checkDir + "/include/" + spec, res)) {
-            found = true;
-            break;
-        }
-        if (checkCandidate(checkDir + "/node_modules/" + spec, res)) {
-            found = true;
-            break;
-        }
-        if (checkCandidate(checkDir + "/deps/" + spec, res)) {
-            found = true;
-            break;
-        }
-
-        long long parentSlash = -1;
-        for (usz i = 0; i < checkDir.size(); ++i) {
-            if (checkDir.data()[i] == '/') parentSlash = (long long)i;
-        }
-        if (parentSlash > 0) {
-            checkDir = checkDir.substring(0, (usz)parentSlash);
-        } else if (parentSlash == 0) {
-            // Root '/'
-            if (checkCandidate(String("/include/") + spec, res)) {
-                found = true;
-            } else if (checkCandidate(String("/node_modules/") + spec, res)) {
-                found = true;
-            } else if (checkCandidate(String("/deps/") + spec, res)) {
-                found = true;
-            }
-            break;
-        } else {
-            break;
-        }
-    }
-
-    // 2. If not found via walk-up, search in user include paths
-    if (!found) {
-        for (usz i = 0; i < includePaths.size(); ++i) {
-            if (checkCandidate(includePaths[i] + "/" + spec, res)) {
-                found = true;
-                break;
+    Language** langPtr = _langsByName.get("cpp");
+    if (langPtr) {
+        Languages::CppLanguage* cppLang = dynamic_cast<Languages::CppLanguage*>(*langPtr);
+        if (cppLang) {
+            Array<String> paths = cppLang->preprocessor().getSearchPaths(currentFile);
+            for (usz i = 0; i < paths.size(); ++i) {
+                if (checkCandidate(paths[i] + "/" + spec, res)) {
+                    found = true;
+                    break;
+                }
             }
         }
     }
 
     // Fallback: resolve relative to nearest dir
     if (!found) {
+        long long lastSlash = -1;
+        for (usz i = 0; i < currentFile.size(); ++i) {
+            if (currentFile.data()[i] == '/') lastSlash = (long long)i;
+        }
+        String currentDir = (lastSlash >= 0) ? currentFile.substring(0, (usz)lastSlash) : ".";
         res = currentDir + "/" + spec;
     }
 
@@ -262,6 +219,10 @@ String Engine::resolveImport(const ImportSpec& imp, const String& currentFile) {
 
 void Engine::discoverFile(const String& rawPath) {
     String path = canonicalize(rawPath);
+    // if (path.includes("disassemble")) {
+    //     ::printf("DEBUG: discoverFile called for path: %s\n", path.c_str());
+    //     ::fflush(stdout);
+    // }
     if (_graph.hasNode(path)) return;
 
     String langName = detectLanguage(path);
@@ -478,28 +439,36 @@ void Engine::find() {
             if (node.path.data()[k] == '.') lastDot = (long long)k;
         }
         if (lastDot >= 0) ext = node.path.substring((usz)lastDot);
-        if (node.language == "cpp" && (ext == ".h" || ext == ".hpp" || ext == ".hxx")) {
+        if ((node.language == "cpp" || node.language == "c") && (ext == ".h" || ext == ".hpp" || ext == ".hxx")) {
             if (seenHeaders.has(node.path)) continue; // skip duplicates
             seenHeaders.set(node.path, true);
-            // Skip engine internal and framework headers
-            if (node.path.includes("/sew/include/") || node.path.includes("include/Languages/") || node.path.includes("include/Sew/") ||
-                node.path.includes("/xic/include/") || node.path.includes("/xic/packages/")) {
-                continue;
-            }
-            Languages::PreprocessorResult ppResult = preprocessor.process(node.content, node.path);
-            parser.parse(ppResult.strippedSource);
+            Languages::PreprocessorResult ppResult;
             String headerPath = canonicalize(node.path);
             if (headerPath.isEmpty()) headerPath = node.path;
-            headerPathsForParse.push(headerPath);
-            String includeRoot = inferIncludeRoot(headerPath);
-            if (!includeRoot.isEmpty() && !containsPath(_inferredIncludeRoots, includeRoot)) {
-                _inferredIncludeRoots.push(includeRoot);
-            }
+            
             if (!isRepl) {
                 Array<String> siblings = preprocessor.findSiblingSourceFiles(headerPath);
                 for (usz s = 0; s < siblings.size(); ++s) {
                     discoverFile(siblings[s]);
+                    if (_graph.hasNode(siblings[s])) {
+                        _graph.addEdge(i, _graph.indexOf(siblings[s]));
+                    }
                 }
+            }
+
+            // Skip engine internal, framework, and third-party dependency headers for JS reflection/bindings
+            if (node.path.includes("/sew/include/") || node.path.includes("include/Languages/") || node.path.includes("include/Sew/") ||
+                node.path.includes("/xic/include/") || node.path.includes("/xic/packages/") ||
+                node.path.includes("/deps/") || node.path.includes("/thirdparty/") ||
+                node.path.includes("/diligent/") || node.path.includes("/glfw/")) {
+                continue;
+            }
+            ppResult = preprocessor.process(node.content, node.path);
+            parser.parse(ppResult.strippedSource);
+            headerPathsForParse.push(headerPath);
+            String includeRoot = inferIncludeRoot(headerPath);
+            if (!includeRoot.isEmpty() && !containsPath(_inferredIncludeRoots, includeRoot)) {
+                _inferredIncludeRoots.push(includeRoot);
             }
             // Only add to bridge #includes if this was an explicit user input
             if (explicitInputPaths.has(headerPath)) {
@@ -627,6 +596,10 @@ bool Engine::build(const String& targetName) {
     }
 
     String tempDir = getTempDir();
+    // printf("Engine::build target: %s, nodes: %d, steps: %d, onCacheHas: %s\n",
+        //    targetName.c_str(), (int)_graph.nodes.size(), (int)_plan.steps.size(),
+        //    onCacheHas ? "yes" : "no");
+    // fflush(stdout);
 
     Map<String, bool> explicitInputPaths;
     for (usz i = 0; i < _inputs.size(); ++i) {
@@ -796,14 +769,9 @@ bool Engine::build(const String& targetName) {
                                 isBridgeJs = nodePath.endsWith("sew_bridge.js");
 
                                 // Check cache
-                                String contentHash = node.contentHash;
-                                Array<String> depHashes;
-                                for (usz d = 0; d < node.dependencies.size(); ++d) {
-                                    depHashes.push(_graph.nodes[node.dependencies[d]].contentHash);
-                                }
                                 bool isPic = outputPath.endsWith(".so");
                                 cacheKey = Cache::computeKey(
-                                    nodeContent + (isPic ? ":fPIC" : ""), targetName, {}, depHashes);
+                                    nodeContent + (isPic ? ":fPIC" : ""), targetName, {}, {});
 
                                 if (onCacheHas && onCacheHas(cacheKey)) {
                                     cachedHit = true;
@@ -874,7 +842,15 @@ bool Engine::build(const String& targetName) {
                         }
                     }
 
-                    if (skip) continue;
+                    if (skip) {
+                        std::lock_guard<std::mutex> lock(stateMutex);
+                        req = CompileRequest();
+                        nodePath.clear();
+                        nodeContent.clear();
+                        cacheKey.clear();
+                        cachedPath.clear();
+                        continue;
+                    }
 
                     if (isBridgeCpp || isBridgeJs) {
                         FILE* f = fopen(nodePath.c_str(), "w");
@@ -884,29 +860,34 @@ bool Engine::build(const String& targetName) {
                         }
                     }
 
-                    if (!lang) continue;
-
-                    CompileResult res = lang->compile(req);
+                    CompileResult res;
+                    if (lang) {
+                        res = lang->compile(req);
+                    }
 
                     {
                         std::lock_guard<std::mutex> lock(stateMutex);
-                        if (!res.success) {
-                            stepSuccess = false;
-                            stepErrors = "Failed to compile " + nodePath + ": " + res.errors;
-                            break;
+                        if (lang) {
+                            if (!res.success) {
+                                stepSuccess = false;
+                                stepErrors = "Failed to compile " + nodePath + ": " + res.errors;
+                            } else {
+                                if (onCacheSet && res.outputPath.length() > 0) {
+                                    onCacheSet(cacheKey, res.outputPath);
+                                }
+                                allResults.push(Xi::Move(res));
+                                node.compiled = true;
+                                compiled++;
+                                if (onProgress) {
+                                    onProgress("Compiling", compiled, totalNodes);
+                                }
+                            }
                         }
-
-                        if (onCacheSet && res.outputPath.length() > 0) {
-                            onCacheSet(cacheKey, res.outputPath);
-                        }
-
-                        allResults.push(Xi::Move(res));
-                        node.compiled = true;
-                        compiled++;
-
-                        if (onProgress) {
-                            onProgress("Compiling", compiled, totalNodes);
-                        }
+                        req = CompileRequest();
+                        nodePath.clear();
+                        nodeContent.clear();
+                        cacheKey.clear();
+                        cachedPath.clear();
                     }
                 }
             }));

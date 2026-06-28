@@ -519,6 +519,20 @@ int main(int argc, char** argv) {
     // Register languages
     CppLanguage cppLang;
     
+
+
+
+
+    MacroDef defGlfwAvailable;
+    defGlfwAvailable.name = "GLFW_AVAILABLE";
+    defGlfwAvailable.value = "1";
+    cppLang.preprocessor().predefined.set("GLFW_AVAILABLE", defGlfwAvailable);
+
+    MacroDef defEnableHlsl;
+    defEnableHlsl.name = "ENABLE_HLSL";
+    defEnableHlsl.value = "1";
+    cppLang.preprocessor().predefined.set("ENABLE_HLSL", defEnableHlsl);
+
     // Configure C++ preprocessor include paths
     cppLang.preprocessor().includePaths.push("include");
     for (usz i = 0; i < includeDirs.size(); ++i) {

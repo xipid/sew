@@ -15,8 +15,14 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <cstring>
+#include <dirent.h>
+#include <mutex>
+#include <cstdio>
 
 namespace Sew { namespace Languages {
+
+static std::mutex s_wildcardMutex;
+static thread_local Array<String> t_currentSearchPaths;
 
 static String getSewIncludePath() {
     char path[1024];
@@ -31,6 +37,8 @@ static String getSewIncludePath() {
     }
     return "include";
 }
+
+static String canonicalizePath(const String& path);
 
 // ─── Utilities ──────────────────────────────────────────────────────────
 
@@ -309,6 +317,48 @@ long long CppPreprocessor::evalExprAtom(const u8*& p, const u8* end,
             return defines.has(macroName) ? 1 : 0;
         }
 
+        if (ident == "__has_include") {
+            skipWhitespace(p, end);
+            bool hasParen = false;
+            if (p < end && *p == '(') { hasParen = true; p++; }
+            skipWhitespace(p, end);
+            
+            u8 delim = 0;
+            if (p < end && (*p == '<' || *p == '"')) {
+                delim = *p;
+                p++;
+            }
+            String headerName;
+            while (p < end) {
+                if (delim != 0 && *p == (delim == '<' ? '>' : '"')) {
+                    p++;
+                    break;
+                }
+                if (delim == 0 && (*p == ')' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+                    break;
+                }
+                headerName += (char)*p;
+                p++;
+            }
+            skipWhitespace(p, end);
+            if (hasParen && p < end && *p == ')') p++;
+            
+            bool found = false;
+            struct stat st;
+            if (::stat(headerName.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                found = true;
+            } else {
+                for (usz i = 0; i < t_currentSearchPaths.size(); ++i) {
+                    String fullPath = t_currentSearchPaths[i] + "/" + headerName;
+                    if (::stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            return found ? 1 : 0;
+        }
+
         // Look up macro value
         const MacroDef* def = defines.get(ident);
         if (def && !def->value.isEmpty()) {
@@ -379,18 +429,159 @@ String CppPreprocessor::replaceInPath(const String& path, const String& from, co
     return path.replace(from, to);
 }
 
+static void scanSubdirsSingle(const String& path, Array<String>& out) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        out.push(path);
+        DIR* dir = ::opendir(path.c_str());
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = ::readdir(dir)) != nullptr) {
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+                String child = path + "/" + entry->d_name;
+                struct stat childSt;
+                if (::stat(child.c_str(), &childSt) == 0 && S_ISDIR(childSt.st_mode)) {
+                    out.push(child);
+                }
+            }
+            ::closedir(dir);
+        }
+    }
+}
+
+static void scanSubdirsRec(const String& path, const String& targetName, Array<String>& out, int depth = 0) {
+    if (depth > 3) return;
+    DIR* dir = ::opendir(path.c_str());
+    if (!dir) return;
+    
+    struct dirent* entry;
+    while ((entry = ::readdir(dir)) != nullptr) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (strcmp(entry->d_name, ".git") == 0 || strcmp(entry->d_name, "build") == 0 || strcmp(entry->d_name, ".sew") == 0) continue;
+        
+        String child = path + "/" + entry->d_name;
+        struct stat st;
+        if (::stat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (strcmp(entry->d_name, targetName.c_str()) == 0) {
+                out.push(child);
+                DIR* subDir = ::opendir(child.c_str());
+                if (subDir) {
+                    struct dirent* subEntry;
+                    while ((subEntry = ::readdir(subDir)) != nullptr) {
+                        if (strcmp(subEntry->d_name, ".") == 0 || strcmp(subEntry->d_name, "..") == 0) continue;
+                        String subChild = child + "/" + subEntry->d_name;
+                        struct stat subSt;
+                        if (::stat(subChild.c_str(), &subSt) == 0 && S_ISDIR(subSt.st_mode)) {
+                            out.push(subChild);
+                        }
+                    }
+                    ::closedir(subDir);
+                }
+            }
+            scanSubdirsRec(child, targetName, out, depth + 1);
+        }
+    }
+    ::closedir(dir);
+}
+
+static Map<String, Array<String>>& getWildcardCache() {
+    static Map<String, Array<String>> cache;
+    return cache;
+}
+
 Array<String> CppPreprocessor::getSearchPaths(const String& currentFile) {
+    std::lock_guard<std::mutex> lock(s_wildcardMutex);
     Array<String> paths;
     paths.push(dirOf(currentFile));
+    
+    long long dilIdx = currentFile.indexOf("/deps/diligent/");
+    if (dilIdx >= 0) {
+        String dilRoot = currentFile.substring(0, (usz)dilIdx + 15);
+        paths.push(dilRoot + "/ThirdParty/volk");
+        paths.push(dilRoot + "/ThirdParty/SPIRV-Cross");
+        paths.push(dilRoot + "/ThirdParty/Vulkan-Headers/include");
+        paths.push(dilRoot + "/ThirdParty/xxHash");
+        paths.push(dilRoot + "/ThirdParty/DirectXShaderCompiler");
+        paths.push(dilRoot + "/ThirdParty/glslang");
+    }
+    
+    String checkDir = dirOf(currentFile);
+    while (!checkDir.isEmpty()) {
+        checkDir = canonicalizePath(checkDir);
+        if (checkDir.isEmpty()) break;
+        
+        Array<String>* cached = getWildcardCache().get(checkDir);
+        if (cached) {
+            for (usz i = 0; i < cached->size(); ++i) {
+                paths.push((*cached)[i]);
+            }
+        } else {
+            Array<String> levelPaths;
+            
+            // %%include/*
+            scanSubdirsSingle(checkDir + "/include", levelPaths);
+            
+            // %%src/*
+            scanSubdirsSingle(checkDir + "/src", levelPaths);
+            
+            // %%node_modules/**/include/* and src/*
+            struct stat stNode;
+            if (::stat((checkDir + "/node_modules").c_str(), &stNode) == 0 && S_ISDIR(stNode.st_mode)) {
+                scanSubdirsRec(checkDir + "/node_modules", "include", levelPaths);
+                scanSubdirsRec(checkDir + "/node_modules", "src", levelPaths);
+            }
+            
+            // %%deps/**/include/* and src/* and interface/*
+            struct stat stDeps;
+            if (::stat((checkDir + "/deps").c_str(), &stDeps) == 0 && S_ISDIR(stDeps.st_mode)) {
+                scanSubdirsSingle(checkDir + "/deps", levelPaths);
+                scanSubdirsRec(checkDir + "/deps", "include", levelPaths);
+                scanSubdirsRec(checkDir + "/deps", "src", levelPaths);
+                scanSubdirsRec(checkDir + "/deps", "interface", levelPaths);
+            }
+            
+            getWildcardCache().set(checkDir, levelPaths);
+            for (usz i = 0; i < levelPaths.size(); ++i) {
+                paths.push(levelPaths[i]);
+            }
+        }
+        
+        long long parentSlash = -1;
+        for (usz i = 0; i < checkDir.size(); ++i) {
+            if (checkDir.data()[i] == '/') parentSlash = (long long)i;
+        }
+        if (parentSlash > 0) {
+            checkDir = checkDir.substring(0, (usz)parentSlash);
+        } else if (parentSlash == 0) {
+            checkDir = "/";
+            if (getWildcardCache().get("/") == nullptr) {
+                Array<String> rootPaths;
+                scanSubdirsSingle("/include", rootPaths);
+                scanSubdirsSingle("/src", rootPaths);
+                getWildcardCache().set("/", rootPaths);
+            }
+            Array<String>* rootCached = getWildcardCache().get("/");
+            if (rootCached) {
+                for (usz i = 0; i < rootCached->size(); ++i) {
+                    paths.push((*rootCached)[i]);
+                }
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    
     for (usz i = 0; i < includePaths.size(); ++i) {
         paths.push(includePaths[i]);
     }
     paths.push(getSewIncludePath());
+    
     struct stat st;
     if (::stat("include", &st) == 0 && S_ISDIR(st.st_mode)) {
         paths.push("include");
     }
-
+    
     const char* xicPath = getenv("SEW_XIC_INCLUDE");
     if (xicPath) {
         paths.push(xicPath);
@@ -401,14 +592,14 @@ Array<String> CppPreprocessor::getSearchPaths(const String& currentFile) {
             nullptr
         };
         for (int i = 0; tryPaths[i]; ++i) {
-            struct stat st;
-            if (::stat(tryPaths[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+            struct stat stDir;
+            if (::stat(tryPaths[i], &stDir) == 0 && S_ISDIR(stDir.st_mode)) {
                 paths.push(tryPaths[i]);
                 break;
             }
         }
     }
-
+    
     const char* extraInclude = getenv("SEW_EXTRA_INCLUDE");
     if (extraInclude) {
         String extraStr(extraInclude);
@@ -488,10 +679,170 @@ String CppPreprocessor::resolveIncludePath(const String& specifier, const String
     return "";
 }
 
+static String getDirOf(const String& path) {
+    long long lastSlash = -1;
+    for (usz i = 0; i < path.size(); ++i) {
+        if (path.data()[i] == '/') lastSlash = (long long)i;
+    }
+    if (lastSlash >= 0) {
+        return path.substring(0, (usz)lastSlash);
+    }
+    return ".";
+}
+
+static String getBaseName(const String& path) {
+    long long lastSlash = -1;
+    for (usz i = 0; i < path.size(); ++i) {
+        if (path.data()[i] == '/') lastSlash = (long long)i;
+    }
+    String name = (lastSlash >= 0) ? path.substring((usz)lastSlash + 1) : path;
+    long long dot = name.indexOf(".");
+    if (dot >= 0) {
+        return name.substring(0, (usz)dot);
+    }
+    return name;
+}
+
+static void scanForFile(const String& dirPath, const String& targetBase, Array<String>& results, int depth) {
+    if (depth > 3) return; // Limit depth to 3 levels to keep it fast
+    DIR* dir = ::opendir(dirPath.c_str());
+    if (!dir) return;
+    struct dirent* entry;
+    while ((entry = ::readdir(dir)) != nullptr) {
+        String name(entry->d_name);
+        if (name == "." || name == "..") continue;
+        String fullPath = dirPath + "/" + name;
+        bool isDir = (entry->d_type == DT_DIR);
+        if (entry->d_type == DT_UNKNOWN) {
+            struct stat st;
+            if (::stat(fullPath.c_str(), &st) == 0) {
+                isDir = S_ISDIR(st.st_mode);
+            }
+        }
+        if (isDir) {
+            if (name != ".git" && name != "build" && name != ".sew" &&
+                name != "test" && name != "tests" && name != "gtests" &&
+                name != "samples" && name != "demo" && name != "demos") {
+                scanForFile(fullPath, targetBase, results, depth + 1);
+            }
+        } else {
+            if (name.startsWith(targetBase) && 
+                (name.endsWith(".cpp") || name.endsWith(".c") || name.endsWith(".cc") || name.endsWith(".cxx"))) {
+                long long dot = name.indexOf(".");
+                if (dot >= 0 && name.substring(0, (usz)dot) == targetBase) {
+                    // Avoid duplicates
+                    bool exists = false;
+                    for (usz k = 0; k < results.size(); ++k) {
+                        if (results[k] == fullPath) { exists = true; break; }
+                    }
+                    if (!exists) results.push(fullPath);
+                }
+            }
+        }
+    }
+    ::closedir(dir);
+}
+
 Array<String> CppPreprocessor::findSiblingSourceFiles(const String& headerPath) {
     Array<String> siblings;
+    if (headerPath.includes("SPIRV-Tools") || 
+        headerPath.includes("SPIRV-Headers") || 
+        headerPath.includes("DirectXShaderCompiler")) {
+        return siblings;
+    }
+
+    if (headerPath.endsWith("DXCompiler.hpp")) {
+        siblings.push(replaceInPath(headerPath, "include/DXCompiler.hpp", "src/DXILUtilsStub.cpp"));
+        return siblings;
+    }
+
     String ext = extOf(headerPath);
     if (ext != ".h" && ext != ".hpp" && ext != ".hxx") return siblings;
+
+    // If the header is part of a third-party dependency, scan its entire directory for implementation files
+    if (headerPath.includes("/deps/") || headerPath.includes("/ThirdParty/") || headerPath.includes("/diligent/") || headerPath.includes("/glfw/")) {
+        // Exclude bypassed compiler libraries
+        if (!headerPath.includes("SPIRV-Tools") && 
+            !headerPath.includes("SPIRV-Headers") &&
+            !headerPath.includes("DirectXShaderCompiler")) {
+            String dir = getDirOf(headerPath);
+            DIR* d = ::opendir(dir.c_str());
+            if (d) {
+                struct dirent* entry;
+                while ((entry = ::readdir(d)) != nullptr) {
+                    String name(entry->d_name);
+                    if (name == "." || name == "..") continue;
+                    String fullPath = dir + "/" + name;
+                    bool isFile = (entry->d_type == DT_REG);
+                    if (entry->d_type == DT_UNKNOWN) {
+                        struct stat st;
+                        if (::stat(fullPath.c_str(), &st) == 0) {
+                            isFile = S_ISREG(st.st_mode);
+                        }
+                    }
+                    if (isFile) {
+                        if (name.endsWith(".cpp") || name.endsWith(".c") || name.endsWith(".cc") || name.endsWith(".cxx")) {
+                            if (name != "main.cpp" && name != "main.c" && name != "main.cc" && name != "main.cxx") {
+                                bool exists = false;
+                                for (usz k = 0; k < siblings.size(); ++k) {
+                                    if (siblings[k] == fullPath) { exists = true; break; }
+                                }
+                                if (!exists) siblings.push(fullPath);
+                            }
+                        }
+                    }
+                }
+                ::closedir(d);
+            }
+
+            // Also scan GenericCodeGen directory when compiling glslang
+            if (dir.includes("/glslang/")) {
+                long long idx = dir.indexOf("/glslang/");
+                if (idx >= 0) {
+                    String root = dir.substring(0, (usz)idx + 9);
+                    String genDir = root + "glslang/GenericCodeGen";
+                    DIR* genD = ::opendir(genDir.c_str());
+                    if (genD) {
+                        struct dirent* entry;
+                        while ((entry = ::readdir(genD)) != nullptr) {
+                            String name(entry->d_name);
+                            if (name == "." || name == "..") continue;
+                            String fullPath = genDir + "/" + name;
+                            if (name.endsWith(".cpp") || name.endsWith(".c")) {
+                                bool exists = false;
+                                for (usz k = 0; k < siblings.size(); ++k) {
+                                    if (siblings[k] == fullPath) { exists = true; break; }
+                                }
+                                if (!exists) siblings.push(fullPath);
+                            }
+                        }
+                        ::closedir(genD);
+                    }
+                }
+            }
+        }
+    }
+
+    // Generic recursive name-matching sibling lookup
+    if (!headerPath.includes("SPIRV-Tools") && 
+        !headerPath.includes("SPIRV-Headers") &&
+        !headerPath.includes("DirectXShaderCompiler")) {
+        String currentDir = getDirOf(headerPath);
+        String targetBase = getBaseName(headerPath);
+        for (int lvl = 0; lvl < 3; ++lvl) {
+            if (currentDir.isEmpty() || currentDir == "/" || currentDir == "/home" || currentDir == "/home/xi" || currentDir == "/home/xi/Repo") break;
+            if (currentDir.endsWith("/ThirdParty") || currentDir.endsWith("/deps") || currentDir.endsWith("/diligent") || currentDir.endsWith("/glfw")) break;
+            scanForFile(currentDir, targetBase, siblings, 0);
+            currentDir = getDirOf(currentDir);
+        }
+        // if (targetBase == "ShaderLang") {
+        //     ::printf("DEBUG: findSiblingSourceFiles for ShaderLang.h (path: %s) found %d siblings:\n", headerPath.c_str(), (int)siblings.size());
+        //     for (usz s = 0; s < siblings.size(); ++s) {
+        //         ::printf("  -> %s\n", siblings[s].c_str());
+        //     }
+        //     ::fflush(stdout);
+        // }
+    }
 
     // Strip extension
     String base = headerPath.substring(0, headerPath.size() - ext.size());
@@ -524,14 +875,105 @@ Array<String> CppPreprocessor::findSiblingSourceFiles(const String& headerPath) 
         }
     }
 
+    // Try interface/ → src/ rewrite
+    long long interfacePos = -1;
+    String interfaceStr = "/interface/";
+    for (usz i = 0; i + interfaceStr.size() <= headerPath.size(); ++i) {
+        bool match = true;
+        for (usz j = 0; j < interfaceStr.size() && match; ++j) {
+            if (headerPath.data()[i + j] != interfaceStr.data()[j]) match = false;
+        }
+        if (match) { interfacePos = (long long)i; break; }
+    }
+
+    if (interfacePos >= 0) {
+        String srcBase = replaceInPath(base, "/interface/", "/src/");
+        for (int i = 0; i < 4; ++i) {
+            String candidate = srcBase;
+            candidate += exts[i];
+            siblings.push(candidate);
+        }
+    }
+
+    if (headerPath.endsWith("Impl.hpp")) {
+        String baseBase = replaceInPath(base, "Impl", "Base");
+        if (interfacePos >= 0) {
+            String srcBase = replaceInPath(baseBase, "/interface/", "/src/");
+            for (int i = 0; i < 4; ++i) {
+                siblings.push(srcBase + exts[i]);
+            }
+        } else if (includePos >= 0) {
+            String srcBase = replaceInPath(baseBase, "/include/", "/src/");
+            for (int i = 0; i < 4; ++i) {
+                siblings.push(srcBase + exts[i]);
+            }
+        } else {
+            for (int i = 0; i < 4; ++i) {
+                siblings.push(baseBase + exts[i]);
+            }
+        }
+    }
+
+    if (headerPath.includes("/deps/glfw/include/GLFW/glfw3.h")) {
+        long long idx = headerPath.indexOf("/deps/glfw/");
+        if (idx >= 0) {
+            String glfwRoot = headerPath.substring(0, (usz)idx + 10);
+            String srcDir = glfwRoot + "/src";
+            const char* glfwSrcs[] = {
+                "context.c", "init.c", "input.c", "monitor.c", "platform.c", "vulkan.c", "window.c",
+                "egl_context.c", "osmesa_context.c", "posix_module.c", "posix_time.c", "posix_thread.c",
+                "x11_init.c", "x11_monitor.c", "x11_window.c", "xkb_unicode.c", "glx_context.c", "linux_joystick.c",
+                "null_init.c", "null_monitor.c", "null_window.c", "null_joystick.c", "posix_poll.c",
+                nullptr
+            };
+            for (int i = 0; glfwSrcs[i]; ++i) {
+                siblings.push(srcDir + "/" + glfwSrcs[i]);
+            }
+        }
+    }
+
+    if (headerPath.includes("/deps/diligent/Platforms/interface/")) {
+        long long idx = headerPath.indexOf("/deps/diligent/");
+        if (idx >= 0) {
+            String dilRoot = headerPath.substring(0, (usz)idx + 15);
+            String linuxSrcDir = dilRoot + "/Platforms/Linux/src";
+            siblings.push(linuxSrcDir + "/LinuxDebug.cpp");
+            siblings.push(linuxSrcDir + "/LinuxFileSystem.cpp");
+            siblings.push(linuxSrcDir + "/LinuxPlatformMisc.cpp");
+        }
+    }
+
+    if (headerPath.includes("/ThirdParty/SPIRV-Cross/")) {
+        long long idx = headerPath.indexOf("/deps/diligent/");
+        if (idx >= 0) {
+            String dilRoot = headerPath.substring(0, (usz)idx + 15);
+            String crossDir = dilRoot + "/ThirdParty/SPIRV-Cross";
+            const char* crossSrcs[] = {
+                "spirv_cfg.cpp", "spirv_cpp.cpp", "spirv_cross.cpp", "spirv_cross_c.cpp",
+                "spirv_cross_parsed_ir.cpp", "spirv_cross_util.cpp", "spirv_glsl.cpp",
+                "spirv_hlsl.cpp", "spirv_msl.cpp", "spirv_parser.cpp", "spirv_reflect.cpp",
+                nullptr
+            };
+            for (int i = 0; crossSrcs[i]; ++i) {
+                siblings.push(crossDir + "/" + crossSrcs[i]);
+            }
+        }
+    }
+
+
+
     return siblings;
 }
 
 // ─── Main Processing Loop ───────────────────────────────────────────────
-
 PreprocessorResult CppPreprocessor::process(const String& source, const String& filePath) {
+    t_currentSearchPaths = getSearchPaths(filePath);
     PreprocessorResult result;
     result.defines = predefined; // Start with pre-seeded defines
+    MacroDef defHasInclude;
+    defHasInclude.name = "__has_include";
+    defHasInclude.value = "1";
+    result.defines.set("__has_include", defHasInclude);
 
     Array<CondFrame> condStack;
     String strippedSource;
@@ -702,6 +1144,7 @@ PreprocessorResult CppPreprocessor::process(const String& source, const String& 
             if (dir.type == "pragma") {
                 String pragmaArgs = dir.args.trim();
                 if (pragmaArgs == "once") {
+                    std::lock_guard<std::mutex> lock(pragmaMutex);
                     if (pragmaOnceFiles.has(filePath)) {
                         // Already included — skip entire file
                         result.strippedSource = "";

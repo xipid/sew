@@ -19,10 +19,28 @@ static String removeSpaces(const String& s) {
 
 static String cleanType(const String& type) {
     String res = type.trim();
-    if (res.startsWith("const ")) res = res.substring(6).trim();
-    if (res.startsWith("volatile ")) res = res.substring(9).trim();
-    while (res.endsWith("*") || res.endsWith("&")) {
-        res = res.substring(0, res.length() - 1).trim();
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        res = res.trim();
+        if (res.startsWith("const ")) {
+            res = res.substring(6);
+            changed = true;
+        } else if (res.startsWith("volatile ")) {
+            res = res.substring(9);
+            changed = true;
+        } else if (res.endsWith(" const")) {
+            res = res.substring(0, res.length() - 6);
+            changed = true;
+        } else if (res.endsWith("volatile")) {
+            if (res.endsWith(" volatile")) {
+                res = res.substring(0, res.length() - 9);
+                changed = true;
+            }
+        } else if (res.endsWith("*") || res.endsWith("&")) {
+            res = res.substring(0, res.length() - 1);
+            changed = true;
+        }
     }
     if (res.indexOf("Func<") >= 0 || res.indexOf("Func <") >= 0) {
         return res;
@@ -32,10 +50,23 @@ static String cleanType(const String& type) {
 
 static String cleanTypeKeepPointer(const String& type) {
     String res = type.trim();
-    if (res.startsWith("const ")) res = res.substring(6).trim();
-    if (res.startsWith("volatile ")) res = res.substring(9).trim();
-    while (res.endsWith("&")) {
-        res = res.substring(0, res.length() - 1).trim();
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        res = res.trim();
+        if (res.startsWith("const ")) {
+            res = res.substring(6);
+            changed = true;
+        } else if (res.startsWith("volatile ")) {
+            res = res.substring(9);
+            changed = true;
+        } else if (res.endsWith(" const")) {
+            res = res.substring(0, res.length() - 6);
+            changed = true;
+        } else if (res.endsWith("&")) {
+            res = res.substring(0, res.length() - 1);
+            changed = true;
+        }
     }
     if (res.indexOf("Func<") >= 0 || res.indexOf("Func <") >= 0) {
         return res;
@@ -58,6 +89,8 @@ static bool isClassType(const String& typeStr, const Array<ParsedClass>& classes
 static String getLambdaArgs(const String& funcSig);
 
 static bool isValidTemplateArg(const String& arg, const Array<ParsedClass>& classes) {
+    //fprintf(stderr, "isValidTemplateArg: arg='%s'\n", arg.c_str());
+    //fflush(stderr);
     String clean = cleanType(arg);
     if (clean == "int" || clean == "long" || clean == "short" || clean == "float" || clean == "double" ||
         clean == "i8" || clean == "i16" || clean == "i32" || clean == "i64" ||
@@ -68,6 +101,7 @@ static bool isValidTemplateArg(const String& arg, const Array<ParsedClass>& clas
     }
     if (arg.indexOf('*') >= 0 || arg.indexOf('&') >= 0) {
         if (arg.indexOf('<') >= 0) return false;
+        if (clean == arg) return false;
         return isValidTemplateArg(clean, classes);
     }
     String dummy;

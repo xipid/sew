@@ -25,6 +25,7 @@
 #include <Collection/Map.hpp>
 #include <Collection/Array.hpp>
 #include <Xi/Func.hpp>
+#include <mutex>
 
 namespace Sew { namespace Languages {
 
@@ -68,15 +69,21 @@ public:
 
     /// Tracks #pragma once files.
     Map<String, bool> pragmaOnceFiles;
+    std::mutex pragmaMutex;
 
     /// Include search paths.
     Array<String> includePaths;
+
+
 
     /// Process a single file.
     PreprocessorResult process(const String& source, const String& filePath);
 
     /// Find sibling .cpp/.c/.o for a header.
     Array<String> findSiblingSourceFiles(const String& headerPath);
+
+    /// Get include search paths.
+    Array<String> getSearchPaths(const String& currentFile);
 
 private:
     // --- Conditional stack ---
@@ -119,9 +126,6 @@ private:
     String readIdentifier(const u8*& p, const u8* end) const;
 
     // --- Path resolution ---
-    /// Get include search paths.
-    Array<String> getSearchPaths(const String& currentFile);
-
     /// Resolve include path: relative to current file, include/→src/ rewrite.
     String resolveIncludePath(const String& specifier, const String& currentFile);
 

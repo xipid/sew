@@ -765,6 +765,16 @@ Array<ImportSpec> CppLanguage::parseImports(const String &source,
     imports.push(Xi::Move(spec));
   }
 
+  // System includes
+  for (usz i = 0; i < ppResult.systemIncludes.size(); ++i) {
+    ImportSpec spec;
+    spec.specifier = ppResult.systemIncludes[i];
+    spec.fromFile = filePath;
+    spec.line = 0;
+    spec.isSystem = true;
+    imports.push(Xi::Move(spec));
+  }
+
   bool skipSiblings = (::getenv("SEW_NO_SIBLINGS") != nullptr);
 
   if (!skipSiblings) {
@@ -799,9 +809,9 @@ static String getTempDir() {
         return String(envTemp);
     }
 
-    char cwd[1024];
-    if (::getcwd(cwd, sizeof(cwd))) {
-        String tempDir = String(cwd) + "/.sew";
+    const char* home = ::getenv("HOME");
+    if (home && home[0] != '\0') {
+        String tempDir = String(home) + "/.sew";
         struct stat st;
         if (::stat(tempDir.c_str(), &st) != 0) {
             ::mkdir(tempDir.c_str(), 0700);
@@ -825,12 +835,49 @@ static String parentDir(const String& path) {
 
 CompileResult CppLanguage::compile(const CompileRequest &req) {
   if (req.sourcePath.endsWith(".c")) {
-    return invokeClang(req, "");
+    CompileRequest modReq = req;
+    Array<String> searchPaths = _preprocessor.getSearchPaths(req.sourcePath);
+    for (usz i = 0; i < searchPaths.size(); ++i) {
+        modReq.includePaths.push(searchPaths[i]);
+    }
+    modReq.flags.push("-DGLFW_AVAILABLE=1");
+    modReq.flags.push("-D_GLFW_X11");
+    modReq.flags.push("-DPLATFORM_LINUX=1");
+    modReq.flags.push("-DVULKAN_SUPPORTED=1");
+    modReq.flags.push("-DENABLE_HLSL=1");
+    modReq.flags.push("-DVK_USE_PLATFORM_XLIB_KHR=1");
+    modReq.flags.push("-DVK_USE_PLATFORM_XCB_KHR=1");
+    modReq.flags.push("-DVK_USE_PLATFORM_WAYLAND_KHR=1");
+    modReq.flags.push("-D__forceinline=inline");
+    modReq.flags.push("-DvkCmdBeginRenderingKHR=vkCmdBeginRendering");
+    modReq.flags.push("-DvkCmdEndRenderingKHR=vkCmdEndRendering");
+    modReq.flags.push("-pthread");
+
+    if (req.sourcePath.includes("/deps/diligent/")) {
+        long long idx = req.sourcePath.indexOf("/deps/diligent/");
+        if (idx >= 0) {
+            String dilRoot = req.sourcePath.substring(0, (usz)idx + 15);
+            modReq.includePaths.push(dilRoot + "/ThirdParty/volk");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/SPIRV-Cross");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/SPIRV-Headers/include");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/volk");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/Vulkan-Headers/include");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/xxHash");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/DirectXShaderCompiler");
+            modReq.includePaths.push(dilRoot + "/ThirdParty/glslang");
+        }
+    }
+    return invokeClang(modReq, "");
   }
 
   if (req.sourcePath.endsWith("Reflection.cpp") || req.sourcePath.endsWith("sew_bridge.cpp")) {
+    CompileRequest modReq = req;
+    Array<String> searchPaths = _preprocessor.getSearchPaths(req.sourcePath);
+    for (usz i = 0; i < searchPaths.size(); ++i) {
+        modReq.includePaths.push(searchPaths[i]);
+    }
     PreprocessorResult ppResult = _preprocessor.process(req.sourceContent, req.sourcePath);
-    return invokeClang(req, ppResult.strippedSource);
+    return invokeClang(modReq, ppResult.strippedSource);
   }
 
   String rewritten = rewriteCppSource(req.sourceContent, g_allParsedClasses);
@@ -851,6 +898,37 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
   if (!srcDir.isEmpty()) {
       modReq.includePaths.push(srcDir);
   }
+  Array<String> searchPaths = _preprocessor.getSearchPaths(req.sourcePath);
+  for (usz i = 0; i < searchPaths.size(); ++i) {
+      modReq.includePaths.push(searchPaths[i]);
+  }
+  modReq.flags.push("-DGLFW_AVAILABLE=1");
+  modReq.flags.push("-D_GLFW_X11");
+  modReq.flags.push("-DPLATFORM_LINUX=1");
+  modReq.flags.push("-DVULKAN_SUPPORTED=1");
+  modReq.flags.push("-DENABLE_HLSL=1");
+  modReq.flags.push("-DVK_USE_PLATFORM_XLIB_KHR=1");
+  modReq.flags.push("-DVK_USE_PLATFORM_XCB_KHR=1");
+  modReq.flags.push("-DVK_USE_PLATFORM_WAYLAND_KHR=1");
+  modReq.flags.push("-D__forceinline=inline");
+  modReq.flags.push("-DvkCmdBeginRenderingKHR=vkCmdBeginRendering");
+  modReq.flags.push("-DvkCmdEndRenderingKHR=vkCmdEndRendering");
+  modReq.flags.push("-pthread");
+
+  if (req.sourcePath.includes("/deps/diligent/")) {
+      long long idx = req.sourcePath.indexOf("/deps/diligent/");
+      if (idx >= 0) {
+          String dilRoot = req.sourcePath.substring(0, (usz)idx + 15);
+          modReq.includePaths.push(dilRoot + "/ThirdParty/volk");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/SPIRV-Cross");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/SPIRV-Headers/include");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/volk");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/Vulkan-Headers/include");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/xxHash");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/DirectXShaderCompiler");
+          modReq.includePaths.push(dilRoot + "/ThirdParty/glslang");
+      }
+  }
 
   CompileResult res = invokeClang(modReq, rewritten);
 
@@ -863,19 +941,26 @@ CompileResult CppLanguage::invokeClang(const CompileRequest &req,
   CompileResult result;
 
   Process p;
-  p.file = "clang++";
+  bool isC = req.sourcePath.endsWith(".c");
+  p.file = isC ? "clang" : "clang++";
 
   if (req.targetTriple.indexOf("wasm32") >= 0) {
       if (ensureWasiSdk()) {
-          p.file = getWasiSdkDir() + "/bin/clang++";
+          p.file = getWasiSdkDir() + (isC ? "/bin/clang" : "/bin/clang++");
       }
-      p.arg.push("-fno-exceptions");
+      if (!isC) {
+          p.arg.push("-fno-exceptions");
+      }
   }
 
   // Base flags
   p.arg.push("-c");
-  p.arg.push("-std=c++17");
-  p.arg.push("-Wno-invalid-offsetof");
+  if (!isC) {
+      p.arg.push("-std=c++17");
+      p.arg.push("-Wno-invalid-offsetof");
+  } else {
+      p.arg.push("-std=gnu99");
+  }
 
   // Target triple
   if (req.targetTriple.length() > 0) {
@@ -1005,3 +1090,114 @@ CompileResult CppLanguage::invokeClang(const CompileRequest &req,
 
 } // namespace Languages
 } // namespace Sew
+
+
+
+#include <functional>
+#include <vector>
+
+enum spv_target_env {
+    SPV_ENV_UNIVERSAL_1_0,
+    SPV_ENV_VULKAN_1_0,
+    SPV_ENV_UNIVERSAL_1_1,
+    SPV_ENV_OPENCL_2_1,
+    SPV_ENV_OPENCL_2_2,
+    SPV_ENV_GLSL_450,
+    SPV_ENV_UNIVERSAL_1_2,
+    SPV_ENV_OPENCL_1_2,
+    SPV_ENV_OPENCL_2_0,
+    SPV_ENV_VULKAN_1_1,
+    SPV_ENV_WEBGPU_0,
+    SPV_ENV_UNIVERSAL_1_3,
+    SPV_ENV_VULKAN_1_1_SPIRV_1_4,
+    SPV_ENV_UNIVERSAL_1_4,
+    SPV_ENV_VULKAN_1_2,
+    SPV_ENV_UNIVERSAL_1_5,
+    SPV_ENV_VULKAN_1_3,
+    SPV_ENV_MAX
+};
+
+enum spv_message_level_t {
+    SPV_MSG_FATAL,
+    SPV_MSG_INTERNAL_ERROR,
+    SPV_MSG_ERROR,
+    SPV_MSG_WARNING,
+    SPV_MSG_INFO,
+    SPV_MSG_DEBUG
+};
+
+struct spv_position_t {
+    size_t line;
+    size_t column;
+    size_t index;
+};
+struct spv_optimizer_options_t {};
+struct spv_validator_options_t {};
+
+namespace spvtools {
+    class ValidatorOptions {
+    public:
+        ValidatorOptions();
+        ~ValidatorOptions();
+        void SetBeforeHlslLegalization(bool);
+    };
+    ValidatorOptions::ValidatorOptions() {}
+    ValidatorOptions::~ValidatorOptions() {}
+    void ValidatorOptions::SetBeforeHlslLegalization(bool) {}
+
+    class OptimizerOptions {
+    public:
+        OptimizerOptions();
+        ~OptimizerOptions();
+        void set_validator_options(const ValidatorOptions&);
+        void set_run_validator(bool);
+    };
+    OptimizerOptions::OptimizerOptions() {}
+    OptimizerOptions::~OptimizerOptions() {}
+    void OptimizerOptions::set_validator_options(const ValidatorOptions&) {}
+    void OptimizerOptions::set_run_validator(bool) {}
+
+    class Optimizer {
+    public:
+        struct PassToken {
+            ~PassToken();
+        };
+        Optimizer(spv_target_env env);
+        ~Optimizer();
+        void SetMessageConsumer(std::function<void(spv_message_level_t, char const*, spv_position_t const&, char const*)> consumer);
+        void RegisterLegalizationPasses();
+        void RegisterPerformancePasses();
+        void RegisterPass(PassToken&& token);
+        bool Run(const uint32_t* code, size_t size, std::vector<uint32_t>* optimized, spv_optimizer_options_t* options) const;
+    };
+    Optimizer::PassToken::~PassToken() {}
+    Optimizer::Optimizer(spv_target_env env) {}
+    Optimizer::~Optimizer() {}
+    void Optimizer::SetMessageConsumer(std::function<void(spv_message_level_t, char const*, spv_position_t const&, char const*)> consumer) {}
+    void Optimizer::RegisterLegalizationPasses() {}
+    void Optimizer::RegisterPerformancePasses() {}
+    void Optimizer::RegisterPass(PassToken&& token) {}
+    bool Optimizer::Run(const uint32_t* code, size_t size, std::vector<uint32_t>* optimized, spv_optimizer_options_t* options) const { return true; }
+
+    Optimizer::PassToken CreateStripReflectInfoPass() {
+        return Optimizer::PassToken();
+    }
+}
+
+extern "C" {
+    spv_validator_options_t* spvValidatorOptionsCreate() { return nullptr; }
+    void spvValidatorOptionsDestroy(spv_validator_options_t*) {}
+    void spvValidatorOptionsSetBeforeHlslLegalization(spv_validator_options_t*, bool) {}
+    spv_optimizer_options_t* spvOptimizerOptionsCreate() { return nullptr; }
+    void spvOptimizerOptionsDestroy(spv_optimizer_options_t*) {}
+    void spvOptimizerOptionsSetValidatorOptions(spv_optimizer_options_t*, spv_validator_options_t*) {}
+    void spvOptimizerOptionsSetRunValidator(spv_optimizer_options_t*, bool) {}
+}
+
+#include <string>
+
+namespace Diligent {
+    std::vector<uint32_t> ConvertUBOToPushConstants(const std::vector<uint32_t>& SPIRV, const std::string& PushConstantName) {
+        return SPIRV;
+    }
+}
