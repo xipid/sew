@@ -1,7 +1,10 @@
 # Sew
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.xxxxxxx.svg)](https://doi.org/10.5281/zenodo.xxxxxxx)
+[![DOI](https://zenodo.org/badge/1258403692.svg)](https://doi.org/10.5281/zenodo.20977334)
+[![Docs](https://img.shields.io/badge/docs-gitbook-blue?style=flat-square)](https://sew.gitbook.io/sew/)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/s7Rg4DHuej)
+
 
 **Sew** is a content-addressable build wrapper, dependency resolver, preprocessor, and reflection registry for C++ and WebAssembly. It replaces complex multi-tool pipelines (like CMake, Ninja, and CCache) with a single, intelligent compilation engine.
 
@@ -26,6 +29,10 @@ Build the project from source:
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 ninja
+
+
+# Or directly:
+./build.sh
 ```
 
 The compiled `sew` binary will be available in the `build` directory.

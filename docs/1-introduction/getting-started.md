@@ -7,6 +7,11 @@ This guide walks through building Sew from source and executing your first compi
 To build the Sew library and compiler binary, configure the project using CMake:
 
 ```bash
+
+./build.sh
+
+# Or
+
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 ninja
