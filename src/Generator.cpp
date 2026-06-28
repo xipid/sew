@@ -528,9 +528,9 @@ String BindingGenerator::generateCppBridge(const Array<ParsedClass>& classes,
     out += "extern \"C\" {\n\n";
 
     // Callback export declaration
-    out += "    void call_js_callback(int cbId, void* argPtr);\n";
-    out += "    bool call_js_callback_bool(int cbId, void* argPtr);\n";
-    out += "    void* call_js_callback_ptr(int cbId, void* argPtr);\n\n";
+    out += "    __attribute__((weak)) void call_js_callback(int cbId, void* argPtr) {}\n";
+    out += "    __attribute__((weak)) bool call_js_callback_bool(int cbId, void* argPtr) { return false; }\n";
+    out += "    __attribute__((weak)) void* call_js_callback_ptr(int cbId, void* argPtr) { return nullptr; }\n\n";
 
     // Allocator helpers
     out += "__attribute__((visibility(\"default\"))) __attribute__((used)) void* alloc_buf(int size) {\n";
