@@ -5,7 +5,7 @@
 
 namespace Sew { namespace Reflect {
 
-class ReflectionRegistry {
+class __attribute__((visibility("default"))) ReflectionRegistry {
 public:
     static Map<String, StructDescriptor>& structs();
     static Map<String, StructDescriptor>& oldStructs();

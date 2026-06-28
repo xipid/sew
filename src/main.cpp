@@ -467,11 +467,19 @@ int main(int argc, char** argv) {
         sew.onCacheGet = [](String key) -> String {
             return Cache::get(key);
         };
-        sew.onCacheSet = [](String key, String content) {
-            Cache::set(key, content);
+        sew.onCacheSet = [](String key, String local_path) {
+            String cacheObjPath = Cache::cacheDir() + "/" + key + ".o";
+            String bytes = readFile(local_path);
+            if (bytes.size() > 0) {
+                writeFile(cacheObjPath, bytes);
+                Cache::set(key, cacheObjPath);
+            }
         };
         sew.onCacheHas = [](String key) -> bool {
-            return Cache::has(key);
+            if (!Cache::has(key)) return false;
+            String path = Cache::get(key);
+            if (path.isEmpty()) return false;
+            return ::access(path.c_str(), 0) == 0;
         };
     }
 

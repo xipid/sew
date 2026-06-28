@@ -2310,8 +2310,12 @@ String BindingGenerator::generateTsGlue(const Array<ParsedClass>& classes,
 
 static bool isKnownType(const String& typeName, const Array<ParsedClass>& classes) {
     String t = typeName.trim();
-    if (t.indexOf("=>") >= 0) {
-        return true;
+    long long arrowPos = t.indexOf("=>");
+    if (arrowPos >= 0) {
+        String ret = t.substring((usz)arrowPos + 2).trim();
+        if (ret.length() > 0) {
+            return true;
+        }
     }
     if (t == "number" || t == "string" || t == "boolean" || t == "bigint" || t == "any" || t == "void" || t == "symbol" || t == "Function" || t == "Symbol" || t == "Uint8Array") {
         return true;
@@ -2447,6 +2451,11 @@ String BindingGenerator::generateJsGlue(const Array<ParsedClass>& classes,
     ts = ts.replace("info: { ptr: number, type: string }", "info");
     
     // Character scanner to strip : Type and as Type annotations
+    FILE* f_debug = fopen("/tmp/ts_debug.txt", "w");
+    if (f_debug) {
+        fwrite(ts.data(), 1, ts.size(), f_debug);
+        fclose(f_debug);
+    }
     String js;
     usz len = ts.length();
     int ternaryDepth = 0;
@@ -2506,17 +2515,24 @@ String BindingGenerator::generateJsGlue(const Array<ParsedClass>& classes,
         // Track ternary depth
         if (c == '?' && i + 1 < len && ts.data()[i+1] != '.' && ts.data()[i+1] != '?') {
             ternaryDepth++;
+            fprintf(stderr, "[DEBUG QUESTION] ternaryDepth=%d at i=%d\n", ternaryDepth, (int)i);
         }
         
         // Check for type annotation
-        if (c == ':' && i + 1 < len && ts.data()[i+1] == ' ') {
+        if (c == ':') {
             if (ternaryDepth > 0) {
+                fprintf(stderr, "[DEBUG COLON] skipped because ternaryDepth=%d at i=%d\n", ternaryDepth, (int)i);
                 ternaryDepth--;
                 js.push(':');
                 continue;
             }
             
-            usz j = i + 2;
+            usz j = i + 1;
+            while (j < len && (ts.data()[j] == ' ' || ts.data()[j] == '\t')) {
+                j++;
+            }
+            
+            usz startType = j;
             int templateDepth = 0;
             int parenDepth = 0;
             while (j < len) {
@@ -2531,23 +2547,34 @@ String BindingGenerator::generateJsGlue(const Array<ParsedClass>& classes,
                     parenDepth++;
                     j++;
                 } else if (nextC == ')') {
-                    parenDepth--;
-                    j++;
+                    if (parenDepth > 0) {
+                        parenDepth--;
+                        j++;
+                    } else {
+                        break;
+                    }
+                } else if (nextC == '=' && j + 1 < len && ts.data()[j+1] == '>') {
+                    j += 2;
                 } else if (std::isalnum(nextC) || nextC == '_' || nextC == '$' || nextC == '[' || nextC == ']' || nextC == '|' || nextC == '?' || nextC == ' ' || nextC == '.' || nextC == '-') {
                     j++;
                 } else if (nextC == ',' && (templateDepth > 0 || parenDepth > 0)) {
+                    j++;
+                } else if (nextC == ':' && (templateDepth > 0 || parenDepth > 0)) {
                     j++;
                 } else {
                     break;
                 }
             }
-            if (j > i + 2 && j < len && (ts.data()[j] == ',' || ts.data()[j] == ')' || ts.data()[j] == '{' || ts.data()[j] == ';' || ts.data()[j] == '\n' || ts.data()[j] == '=')) {
-                String typeName = ts.substring(i + 2, j).trim();
+            if (j > startType && j < len && (ts.data()[j] == ',' || ts.data()[j] == ')' || ts.data()[j] == '{' || ts.data()[j] == ';' || ts.data()[j] == '\n' || ts.data()[j] == '=')) {
+                String typeName = ts.substring(startType, j).trim();
+                fprintf(stderr, "[DEBUG STRIP] typeName='%s' isKnown=%d nextC='%c'\n", typeName.c_str(), isKnownType(typeName, classes), ts.data()[j]);
                 if (isKnownType(typeName, classes)) {
                     i = j - 1;
                     continue;
                 }
             }
+            js.push(':');
+            continue;
         }
         
         // Check for 'as' cast
@@ -2592,6 +2619,15 @@ String BindingGenerator::generateQuickjsBindings(const Array<ParsedClass>& class
     out += "#include <cstring>\n";
     out += "#include <cstdint>\n";
     out += "#include <stdint.h>\n\n";
+    out += "#define JS_ToFloat64(ctx, pres, val) do { \\\n";
+    out += "    if (JS_IsBigInt(ctx, val)) { \\\n";
+    out += "        int64_t v = 0; \\\n";
+    out += "        JS_ToBigInt64(ctx, &v, val); \\\n";
+    out += "        *(pres) = (double)v; \\\n";
+    out += "    } else { \\\n";
+    out += "        ::JS_ToFloat64(ctx, pres, val); \\\n";
+    out += "    } \\\n";
+    out += "} while(0)\n\n";
 
     // Extern C declarations for C++ bridge functions
     out += "extern \"C\" {\n";
@@ -2683,7 +2719,7 @@ String BindingGenerator::generateQuickjsBindings(const Array<ParsedClass>& class
             if (!isValidType(fn.params[k].type, classes)) { fnValid = false; break; }
         }
         if (!fnValid) continue;
-        out += "  void* export_" + fn.name + "_" + String((long long)i) + "(";
+        out += "  void* export_" + replaceColons(fn.name) + "_" + String((long long)i) + "(";
         for (usz p = 0; p < fn.params.size(); ++p) {
             if (p > 0) out += ", ";
             out += "void*";
@@ -2938,12 +2974,12 @@ String BindingGenerator::generateQuickjsBindings(const Array<ParsedClass>& class
             if (!isValidType(fn.params[k].type, classes)) { fnValid = false; break; }
         }
         if (!fnValid) continue;
-        out += "static JSValue js_export_" + fn.name + "_" + String((long long)i) + "(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {\n";
+        out += "static JSValue js_export_" + replaceColons(fn.name) + "_" + String((long long)i) + "(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {\n";
         for (usz p = 0; p < fn.params.size(); ++p) {
             out += "  double d" + String((long long)p) + " = 0.0;\n";
             out += "  JS_ToFloat64(ctx, &d" + String((long long)p) + ", argv[" + String((long long)p) + "]);\n";
         }
-        out += "  return JS_NewFloat64(ctx, (double)(uintptr_t)export_" + fn.name + "_" + String((long long)i) + "(";
+        out += "  return JS_NewFloat64(ctx, (double)(uintptr_t)export_" + replaceColons(fn.name) + "_" + String((long long)i) + "(";
         for (usz p = 0; p < fn.params.size(); ++p) {
             if (p > 0) out += ", ";
             out += "(void*)(uintptr_t)d" + String((long long)p);
@@ -2952,8 +2988,73 @@ String BindingGenerator::generateQuickjsBindings(const Array<ParsedClass>& class
         out += "}\n\n";
     }
 
+    // Callback support
+    out += "extern \"C\" {\n";
+    out += "  static JSContext* global_js_ctx = nullptr;\n";
+    out += "  void call_js_callback(int cbId, void* argPtr) {\n";
+    out += "    if (!global_js_ctx) return;\n";
+    out += "    JSContext* ctx = global_js_ctx;\n";
+    out += "    JSValue global = JS_GetGlobalObject(ctx);\n";
+    out += "    JSValue cbFunc = JS_GetPropertyStr(ctx, global, \"call_js_callback\");\n";
+    out += "    if (JS_IsFunction(ctx, cbFunc)) {\n";
+    out += "      JSValue args[2];\n";
+    out += "      args[0] = JS_NewInt32(ctx, cbId);\n";
+    out += "      args[1] = JS_NewFloat64(ctx, (double)(uintptr_t)argPtr);\n";
+    out += "      JSValue res = JS_Call(ctx, cbFunc, global, 2, args);\n";
+    out += "      JS_FreeValue(ctx, res);\n";
+    out += "      JS_FreeValue(ctx, args[0]);\n";
+    out += "      JS_FreeValue(ctx, args[1]);\n";
+    out += "    }\n";
+    out += "    JS_FreeValue(ctx, cbFunc);\n";
+    out += "    JS_FreeValue(ctx, global);\n";
+    out += "  }\n";
+    out += "  bool call_js_callback_bool(int cbId, void* argPtr) {\n";
+    out += "    if (!global_js_ctx) return false;\n";
+    out += "    JSContext* ctx = global_js_ctx;\n";
+    out += "    JSValue global = JS_GetGlobalObject(ctx);\n";
+    out += "    JSValue cbFunc = JS_GetPropertyStr(ctx, global, \"call_js_callback_bool\");\n";
+    out += "    bool ret = false;\n";
+    out += "    if (JS_IsFunction(ctx, cbFunc)) {\n";
+    out += "      JSValue args[2];\n";
+    out += "      args[0] = JS_NewInt32(ctx, cbId);\n";
+    out += "      args[1] = JS_NewFloat64(ctx, (double)(uintptr_t)argPtr);\n";
+    out += "      JSValue res = JS_Call(ctx, cbFunc, global, 2, args);\n";
+    out += "      ret = JS_ToBool(ctx, res) != 0;\n";
+    out += "      JS_FreeValue(ctx, res);\n";
+    out += "      JS_FreeValue(ctx, args[0]);\n";
+    out += "      JS_FreeValue(ctx, args[1]);\n";
+    out += "    }\n";
+    out += "    JS_FreeValue(ctx, cbFunc);\n";
+    out += "    JS_FreeValue(ctx, global);\n";
+    out += "    return ret;\n";
+    out += "  }\n";
+    out += "  void* call_js_callback_ptr(int cbId, void* argPtr) {\n";
+    out += "    if (!global_js_ctx) return nullptr;\n";
+    out += "    JSContext* ctx = global_js_ctx;\n";
+    out += "    JSValue global = JS_GetGlobalObject(ctx);\n";
+    out += "    JSValue cbFunc = JS_GetPropertyStr(ctx, global, \"call_js_callback_ptr\");\n";
+    out += "    void* ret = nullptr;\n";
+    out += "    if (JS_IsFunction(ctx, cbFunc)) {\n";
+    out += "      JSValue args[2];\n";
+    out += "      args[0] = JS_NewInt32(ctx, cbId);\n";
+    out += "      args[1] = JS_NewFloat64(ctx, (double)(uintptr_t)argPtr);\n";
+    out += "      JSValue res = JS_Call(ctx, cbFunc, global, 2, args);\n";
+    out += "      double d = 0.0;\n";
+    out += "      JS_ToFloat64(ctx, &d, res);\n";
+    out += "      ret = (void*)(uintptr_t)d;\n";
+    out += "      JS_FreeValue(ctx, res);\n";
+    out += "      JS_FreeValue(ctx, args[0]);\n";
+    out += "      JS_FreeValue(ctx, args[1]);\n";
+    out += "    }\n";
+    out += "    JS_FreeValue(ctx, cbFunc);\n";
+    out += "    JS_FreeValue(ctx, global);\n";
+    out += "    return ret;\n";
+    out += "  }\n";
+    out += "}\n\n";
+
     // Registration Function
     out += "extern \"C\" void register_sew_native_bindings(JSContext *ctx, JSValue native_obj) {\n";
+    out += "  global_js_ctx = ctx;\n";
     out += "  JS_SetPropertyStr(ctx, native_obj, \"alloc_buf\", JS_NewCFunction(ctx, js_alloc_buf, \"alloc_buf\", 1));\n";
     out += "  JS_SetPropertyStr(ctx, native_obj, \"free_buf\", JS_NewCFunction(ctx, js_free_buf, \"free_buf\", 1));\n";
     out += "  JS_SetPropertyStr(ctx, native_obj, \"export_String_c_str\", JS_NewCFunction(ctx, js_export_String_c_str, \"export_String_c_str\", 1));\n";
@@ -3033,7 +3134,7 @@ String BindingGenerator::generateQuickjsBindings(const Array<ParsedClass>& class
             if (!isValidType(fn.params[k].type, classes)) { fnValid = false; break; }
         }
         if (!fnValid) continue;
-        out += "  JS_SetPropertyStr(ctx, native_obj, \"export_" + fn.name + "_" + String((long long)i) + "\", JS_NewCFunction(ctx, js_export_" + fn.name + "_" + String((long long)i) + ", \"export_" + fn.name + "_" + String((long long)i) + "\", " + String((long long)fn.params.size()) + "));\n";
+        out += "  JS_SetPropertyStr(ctx, native_obj, \"export_" + replaceColons(fn.name) + "_" + String((long long)i) + "\", JS_NewCFunction(ctx, js_export_" + replaceColons(fn.name) + "_" + String((long long)i) + ", \"export_" + replaceColons(fn.name) + "_" + String((long long)i) + "\", " + String((long long)fn.params.size()) + "));\n";
     }
     out += "}\n";
     return out;

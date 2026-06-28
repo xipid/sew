@@ -649,7 +649,7 @@ bool Engine::build(const String& targetName) {
                     String cachedPath;
                     {
                         std::lock_guard<std::mutex> lock(stateMutex);
-                        if (!node.path.endsWith("sew_bridge.cpp") && onCacheHas && onCacheHas(cacheKey)) {
+                        if (!node.path.endsWith("sew_bridge.cpp") && !node.path.endsWith("sew_bridge.js") && onCacheHas && onCacheHas(cacheKey)) {
                             cachedHit = true;
                             if (onProgress) {
                                 compiled++;
@@ -828,9 +828,9 @@ bool Engine::build(const String& targetName) {
     }
 
     // Clean up temporary sew_bridge files
-    ::unlink((tempDir + "/sew_bridge.cpp").c_str());
-    ::unlink((tempDir + "/sew_bridge.js").c_str());
-    ::unlink((tempDir + "/sew_obj__tmp_sew_bridge.o").c_str());
+    // ::unlink((tempDir + "/sew_bridge.cpp").c_str());
+    // ::unlink((tempDir + "/sew_bridge.js").c_str());
+    // ::unlink((tempDir + "/sew_obj__tmp_sew_bridge.o").c_str());
     return true;
 }
 

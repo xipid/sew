@@ -164,6 +164,13 @@ LinkResult NativeTarget::link(const LinkRequest& req) {
         boot += "    if (JS_IsException(val)) return nullptr;\n";
         boot += "    JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(val);\n";
         boot += "    JSValue res = JS_EvalFunction(ctx, val);\n";
+        boot += "    if (JS_IsException(res)) {\n";
+        boot += "      JSValue exc = JS_GetException(ctx);\n";
+        boot += "      const char *err = JS_ToCString(ctx, exc);\n";
+        boot += "      fprintf(stderr, \"[MODULE_LOADER ERROR] %s\\n\", err);\n";
+        boot += "      JS_FreeCString(ctx, err);\n";
+        boot += "      JS_FreeValue(ctx, exc);\n";
+        boot += "    }\n";
         boot += "    JS_FreeValue(ctx, res);\n";
         boot += "    return m;\n";
         boot += "  }\n";

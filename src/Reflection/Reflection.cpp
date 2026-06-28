@@ -255,10 +255,9 @@ void ReflectionRegistry::registerVariable(const String& name, void* ptr) {
     usz addr = (usz)ptr;
     usz* oldAddr = globalVariables().get(name);
     if (oldAddr) {
-        redirect(addr, *oldAddr);
-    } else {
-        globalVariables().set(name, addr);
+        redirect(*oldAddr, addr);
     }
+    globalVariables().set(name, addr);
 }
 
 void ReflectionRegistry::registerInstance(const String& typeName, void* ptr) {

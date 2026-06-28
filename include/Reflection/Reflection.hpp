@@ -4,7 +4,7 @@
 
 namespace Sew { namespace Reflect {
 
-class Reflection {
+class __attribute__((visibility("default"))) Reflection {
 private:
     void* _instance = nullptr;
     const StructDescriptor* _desc = nullptr;
