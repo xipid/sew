@@ -2,6 +2,7 @@
 
 let wasmInstance: any;
 let wasmMemory: any;
+let exports: any;
 
 const files: Record<string, { type: string; contents: Uint8Array }> = {
   "/": { type: "dir", contents: new Uint8Array(0) }
@@ -71,163 +72,352 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
       call_js_callback: call_js_callback,
       call_js_callback_bool: call_js_callback_bool,
       call_js_callback_ptr: call_js_callback_ptr,
-      
+
+      _ZN2Xi4Time5sleepEd: () => { },
+      _ZN2Xi16secureRandomFillERN10Collection6StringEm: (strPtr: number, len: number) => {
+        if (typeof crypto !== 'undefined' && crypto.getRandomValues && len > 0) {
+          const memory = exports || wasmMemory;
+          const dataView = new Uint32Array(memory.buffer, strPtr, 1);
+          const char_data_ptr = dataView[0];
+          const view = new Uint8Array(memory.buffer, char_data_ptr, len);
+          crypto.getRandomValues(view);
+        }
+      },
+      _ZN2Xi10randomSeedEN10Collection6StringE: () => { },
+      __syscall_unlinkat: () => 0,
+      __syscall_bind: () => 0,
+      __syscall_getsockname: () => 0,
+      __syscall_recvfrom: () => 0,
+      __syscall_sendto: () => 0,
+      __syscall_socket: () => 0,
+
       // ─── xic fetch API ──────────────────────────────────────────────────
       xic_fetch_get: (urlPtr: number, onSuccessPtr: number, onErrorPtr: number) => {
-        const memory = wasmInstance.exports.memory || wasmMemory;
+        const memory = exports || wasmMemory;
         let len = 0;
         while (new Uint8Array(memory.buffer, urlPtr + len, 1)[0] !== 0) len++;
         const url = new TextDecoder().decode(new Uint8Array(memory.buffer, urlPtr, len));
-        
+
         fetch(url)
           .then(res => res.arrayBuffer())
           .then(buf => {
             const bytes = new Uint8Array(buf);
-            const mallocPtr = wasmInstance.exports.malloc(bytes.length + 1);
+            const mallocPtr = exports.malloc(bytes.length + 1);
             const dest = new Uint8Array(memory.buffer, mallocPtr, bytes.length + 1);
             dest.set(bytes);
             dest[bytes.length] = 0;
-            wasmInstance.exports.__indirect_function_table.get(onSuccessPtr)(mallocPtr, bytes.length);
-            wasmInstance.exports.free(mallocPtr);
+            exports.__indirect_function_table.get(onSuccessPtr)(mallocPtr, bytes.length);
+            exports.free(mallocPtr);
           })
           .catch(err => {
             const errBytes = new TextEncoder().encode(err.message || String(err));
-            const mallocPtr = wasmInstance.exports.malloc(errBytes.length + 1);
+            const mallocPtr = exports.malloc(errBytes.length + 1);
             const dest = new Uint8Array(memory.buffer, mallocPtr, errBytes.length + 1);
             dest.set(errBytes);
             dest[errBytes.length] = 0;
-            wasmInstance.exports.__indirect_function_table.get(onErrorPtr)(mallocPtr);
-            wasmInstance.exports.free(mallocPtr);
+            exports.__indirect_function_table.get(onErrorPtr)(mallocPtr);
+            exports.free(mallocPtr);
           });
       },
-      
+
       xic_fetch_post: (urlPtr: number, bodyPtr: number, onSuccessPtr: number, onErrorPtr: number) => {
-        const memory = wasmInstance.exports.memory || wasmMemory;
+        const memory = exports || wasmMemory;
         let len = 0;
         while (new Uint8Array(memory.buffer, urlPtr + len, 1)[0] !== 0) len++;
         const url = new TextDecoder().decode(new Uint8Array(memory.buffer, urlPtr, len));
-        
+
         let bodyLen = 0;
         while (new Uint8Array(memory.buffer, bodyPtr + bodyLen, 1)[0] !== 0) bodyLen++;
         const body = new TextDecoder().decode(new Uint8Array(memory.buffer, bodyPtr, bodyLen));
-        
+
         fetch(url, { method: "POST", body })
           .then(res => res.arrayBuffer())
           .then(buf => {
             const bytes = new Uint8Array(buf);
-            const mallocPtr = wasmInstance.exports.malloc(bytes.length + 1);
+            const mallocPtr = exports.malloc(bytes.length + 1);
             const dest = new Uint8Array(memory.buffer, mallocPtr, bytes.length + 1);
             dest.set(bytes);
             dest[bytes.length] = 0;
-            wasmInstance.exports.__indirect_function_table.get(onSuccessPtr)(mallocPtr, bytes.length);
-            wasmInstance.exports.free(mallocPtr);
+            exports.__indirect_function_table.get(onSuccessPtr)(mallocPtr, bytes.length);
+            exports.free(mallocPtr);
           })
           .catch(err => {
             const errBytes = new TextEncoder().encode(err.message || String(err));
-            const mallocPtr = wasmInstance.exports.malloc(errBytes.length + 1);
+            const mallocPtr = exports.malloc(errBytes.length + 1);
             const dest = new Uint8Array(memory.buffer, mallocPtr, errBytes.length + 1);
             dest.set(errBytes);
             dest[errBytes.length] = 0;
-            wasmInstance.exports.__indirect_function_table.get(onErrorPtr)(mallocPtr);
-            wasmInstance.exports.free(mallocPtr);
+            exports.__indirect_function_table.get(onErrorPtr)(mallocPtr);
+            exports.free(mallocPtr);
           });
       },
 
-      // ─── WebGPU Bridge API ──────────────────────────────────────────────
-      wgpu_request_adapter: (onAdapterReady: number) => {
+      // ─── Standard WebGPU C API to JS Host Bridge ──────────────────────
+      wgpuRequestAdapter: (canvasIdPtr: number, callbackPtr: number, userdata: number) => {
         if (!navigator.gpu) {
-          console.error("WebGPU is not supported on this browser (navigator.gpu is undefined).");
-          wasmInstance.exports.__indirect_function_table.get(onAdapterReady)(0);
+          console.error("WebGPU not supported on this browser.");
+          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
           return;
         }
+        const canvasId = readString(canvasIdPtr);
         navigator.gpu.requestAdapter().then(adapter => {
           if (!adapter) {
-            console.error("WebGPU requestAdapter() returned null (no GPU adapters available).");
-            wasmInstance.exports.__indirect_function_table.get(onAdapterReady)(0);
+            wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
             return;
           }
           const id = regGpu(adapter);
-          wasmInstance.exports.__indirect_function_table.get(onAdapterReady)(id);
-        }).catch(err => {
-          console.error("WebGPU error requesting adapter:", err);
-          wasmInstance.exports.__indirect_function_table.get(onAdapterReady)(0);
+          const canvas = document.getElementById(canvasId);
+          if (canvas) {
+            (adapter as any)._canvas = canvas;
+          }
+          // Pass 2 arguments: (adapterId, userdata)
+          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(id, userdata);
+        }).catch((err) => {
+          console.error("Adapter request failed:", err);
+          // Pass 2 arguments: (0, userdata)
+          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
         });
       },
-      
-      wgpu_adapter_request_device: (adapterId: number, onDeviceReady: number) => {
+
+      wgpuAdapterRequestDevice: (adapterId: number, callbackPtr: number, userdata: number) => {
         const adapter = gpuRegistry.get(adapterId);
         adapter.requestDevice().then((device: any) => {
           const id = regGpu(device);
-          wasmInstance.exports.__indirect_function_table.get(onDeviceReady)(id);
+          if (adapter._canvas) {
+            const context = adapter._canvas.getContext("webgpu");
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format, alphaMode: "opaque" });
+            device._contextId = regGpu(context);
+          }
+          // Pass 2 arguments: (deviceId, userdata)
+          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(id, userdata);
+        }).catch((err) => {
+          console.error("Device request failed:", err);
+          // Pass 2 arguments: (0, userdata)
+          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
         });
       },
-      
-      wgpu_device_create_shader_module: (deviceId: number, wgslCodePtr: number) => {
+      wgpuDeviceGetQueue: (deviceId: number) => {
         const device = gpuRegistry.get(deviceId);
-        const memory = wasmInstance.exports.memory || wasmMemory;
-        let len = 0;
-        while (new Uint8Array(memory.buffer, wgslCodePtr + len, 1)[0] !== 0) len++;
-        const code = new TextDecoder().decode(new Uint8Array(memory.buffer, wgslCodePtr, len));
+        return regGpu(device.queue);
+      },
+
+      wgpuDeviceCreateShaderModule: (deviceId: number, descriptorPtr: number) => {
+        const device = gpuRegistry.get(deviceId);
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new DataView(activeMemory);
+        const chainPtr = view.getUint32(descriptorPtr, true);
+        const codePtr = view.getUint32(chainPtr, true);
+        const code = readString(codePtr);
         const sm = device.createShaderModule({ code });
         return regGpu(sm);
       },
-      
-      wgpu_device_create_pipeline: (deviceId: number, shaderModuleId: number, entryPointPtr: number) => {
+
+      wgpuDeviceCreateBuffer: (deviceId: number, descriptorPtr: number) => {
         const device = gpuRegistry.get(deviceId);
-        const sm = gpuRegistry.get(shaderModuleId);
-        const memory = wasmInstance.exports.memory || wasmMemory;
-        let len = 0;
-        while (new Uint8Array(memory.buffer, entryPointPtr + len, 1)[0] !== 0) len++;
-        const entryPoint = new TextDecoder().decode(new Uint8Array(memory.buffer, entryPointPtr, len));
-        const pipeline = device.createComputePipeline({
-          layout: "auto",
-          compute: { module: sm, entryPoint }
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new DataView(activeMemory);
+        const labelPtr = view.getUint32(descriptorPtr, true);
+        const usage = view.getUint32(descriptorPtr + 4, true);
+        const size = Number(view.getBigUint64(descriptorPtr + 8, true));
+        const mappedAtCreation = view.getUint8(descriptorPtr + 16) !== 0;
+        const buffer = device.createBuffer({
+          label: labelPtr ? readString(labelPtr) : undefined,
+          size,
+          usage,
+          mappedAtCreation
         });
-        return regGpu(pipeline);
+        return regGpu(buffer);
       },
-      
-      wgpu_device_run_compute: (deviceId: number, pipelineId: number, bufferId: number, workgroupCountX: number) => {
+
+      wgpuBufferWrite: (queueId: number, bufferId: number, bufferOffset: number, dataPtr: number, size: number) => {
+        const queue = gpuRegistry.get(queueId);
+        const buffer = gpuRegistry.get(bufferId);
+        const view = new Uint8Array(wasmMemory.buffer, dataPtr, size);
+        queue.writeBuffer(buffer, bufferOffset, view, 0, size);
+      },
+
+      wgpuBufferDestroy: (bufferId: number) => {
+        const buffer = gpuRegistry.get(bufferId);
+        if (buffer) {
+          buffer.destroy();
+          gpuRegistry.delete(bufferId);
+        }
+      },
+
+      wgpuDeviceCreateBindGroupLayout: (deviceId: number, descriptorPtr: number) => {
         const device = gpuRegistry.get(deviceId);
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new DataView(activeMemory);
+        const labelPtr = view.getUint32(descriptorPtr, true);
+        const entryCount = view.getUint32(descriptorPtr + 4, true);
+        const entriesPtr = view.getUint32(descriptorPtr + 8, true);
+        const entries: any[] = [];
+        for (let i = 0; i < entryCount; i++) {
+          const entryOffset = entriesPtr + i * 8;
+          entries.push({
+            binding: view.getUint32(entryOffset, true),
+            visibility: view.getUint32(entryOffset + 4, true),
+            buffer: {}
+          });
+        }
+        const bgl = device.createBindGroupLayout({
+          label: labelPtr ? readString(labelPtr) : undefined,
+          entries
+        });
+        return regGpu(bgl);
+      },
+
+      wgpuDeviceCreateBindGroup: (deviceId: number, descriptorPtr: number) => {
+        const device = gpuRegistry.get(deviceId);
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new DataView(activeMemory);
+        const labelPtr = view.getUint32(descriptorPtr, true);
+        const layoutId = view.getUint32(descriptorPtr + 4, true);
+        const entryCount = view.getUint32(descriptorPtr + 8, true);
+        const entriesPtr = view.getUint32(descriptorPtr + 12, true);
+        const layout = gpuRegistry.get(layoutId);
+        const entries: any[] = [];
+        for (let i = 0; i < entryCount; i++) {
+          const entryOffset = entriesPtr + i * 28;
+          const binding = view.getUint32(entryOffset, true);
+          const bufferId = view.getUint32(entryOffset + 4, true);
+          const offset = Number(view.getBigUint64(entryOffset + 8, true));
+          const size = Number(view.getBigUint64(entryOffset + 16, true));
+          const resource: any = {
+            buffer: gpuRegistry.get(bufferId),
+            offset,
+            size
+          };
+          entries.push({ binding, resource });
+        }
+        const bg = device.createBindGroup({
+          label: labelPtr ? readString(labelPtr) : undefined,
+          layout,
+          entries
+        });
+        return regGpu(bg);
+      },
+
+      wgpuDeviceCreateCommandEncoder: (deviceId: number, labelPtr: number) => {
+        const device = gpuRegistry.get(deviceId);
+        const encoder = device.createCommandEncoder({
+          label: labelPtr ? readString(labelPtr) : undefined
+        });
+
+        // FIX: Propagate the context ID from the device to the encoder
+        encoder._contextId = device._contextId;
+
+        return regGpu(encoder);
+      },
+
+      wgpuCommandEncoderBeginComputePass: (encoderId: number, labelPtr: number) => {
+        const encoder = gpuRegistry.get(encoderId);
+        const pass = encoder.beginComputePass({
+          label: labelPtr ? readString(labelPtr) : undefined
+        });
+        return regGpu(pass);
+      },
+
+      wgpuComputePassSetPipeline: (passId: number, pipelineId: number) => {
+        const pass = gpuRegistry.get(passId);
         const pipeline = gpuRegistry.get(pipelineId);
-        // Simple compute shader execution interface
+        pass.setPipeline(pipeline);
       },
-      wgpu_configure_canvas: (deviceId: number, canvasIdPtr: number) => {
-        const device = gpuRegistry.get(deviceId);
-        const memory = wasmInstance.exports.memory || wasmMemory;
-        let len = 0;
-        while (new Uint8Array(memory.buffer, canvasIdPtr + len, 1)[0] !== 0) len++;
-        const canvasId = new TextDecoder().decode(new Uint8Array(memory.buffer, canvasIdPtr, len));
-        const canvas = document.getElementById(canvasId) as HTMLCanvasElement;
-        const context = canvas.getContext('webgpu');
-        const format = navigator.gpu.getPreferredCanvasFormat();
-        context.configure({ device, format, alphaMode: 'opaque' });
-        return regGpu(context);
+
+      wgpuComputePassSetBindGroup: (passId: number, groupIndex: number, bindGroupId: number, dynamicOffsetCount: number, dynamicOffsetsPtr: number) => {
+        const pass = gpuRegistry.get(passId);
+        const bg = gpuRegistry.get(bindGroupId);
+        let offsets: number[] | undefined = undefined;
+        if (dynamicOffsetCount > 0 && dynamicOffsetsPtr) {
+          offsets = Array.from(new Uint32Array(wasmMemory.buffer, dynamicOffsetsPtr, dynamicOffsetCount));
+        }
+        pass.setBindGroup(groupIndex, bg, offsets);
       },
-      wgpu_clear_canvas: (deviceId: number, contextId: number, r: number, g: number, b: number, a: number) => {
-        const device = gpuRegistry.get(deviceId);
-        const context = gpuRegistry.get(contextId);
-        const commandEncoder = device.createCommandEncoder();
-        const textureView = context.getCurrentTexture().createView();
-        const renderPassDescriptor = {
-          colorAttachments: [{
-            view: textureView,
-            clearValue: { r, g, b, a },
-            loadOp: 'clear',
-            storeOp: 'store'
-          }]
-        };
-        const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
-        passEncoder.end();
-        device.queue.submit([commandEncoder.finish()]);
+
+      wgpuComputePassDispatchWorkgroups: (passId: number, x: number, y: number, z: number) => {
+        const pass = gpuRegistry.get(passId);
+        pass.dispatchWorkgroups(x, y, z);
       },
-      js_request_animation_frame: (callbackPtr: number) => {
+
+      wgpuComputePassEnd: (passId: number) => {
+        const pass = gpuRegistry.get(passId);
+        pass.end();
+        gpuRegistry.delete(passId);
+      },
+
+      wgpuCommandEncoderFinish: (encoderId: number, labelPtr: number) => {
+        const encoder = gpuRegistry.get(encoderId);
+        const cb = encoder.finish({
+          label: labelPtr ? readString(labelPtr) : undefined
+        });
+        gpuRegistry.delete(encoderId);
+        return regGpu(cb);
+      },
+
+      wgpuQueueSubmit: (queueId: number, commandCount: number, commandsPtr: number) => {
+        const queue = gpuRegistry.get(queueId);
+        // Dynamically get the active memory buffer
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new Uint32Array(activeMemory, commandsPtr, commandCount);
+        const commandBuffers: any[] = [];
+        for (let i = 0; i < commandCount; i++) {
+          const cb = gpuRegistry.get(view[i]);
+          commandBuffers.push(cb);
+          gpuRegistry.delete(view[i]);
+        }
+        queue.submit(commandBuffers);
+      },
+
+      jsRequestAnimationFrame: (callbackPtr: number) => {
         requestAnimationFrame(() => {
           wasmInstance.exports.__indirect_function_table.get(callbackPtr)();
         });
-      }
+      },
+
+      wgpuCommandEncoderBeginRenderPass: (encoderId: number, descriptorPtr: number) => {
+        const encoder = gpuRegistry.get(encoderId);
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new DataView(activeMemory);
+        const colorAttachmentCount = view.getUint32(descriptorPtr, true);
+        const colorAttachmentsPtr = view.getUint32(descriptorPtr + 4, true);
+        const colorAttachments: any[] = [];
+        for (let i = 0; i < colorAttachmentCount; i++) {
+          const offset = colorAttachmentsPtr + i * 48;
+          const texViewId = view.getUint32(offset, true);
+          const resolveTargetId = view.getUint32(offset + 4, true);
+          const loadOp = view.getUint32(offset + 8, true);
+          const storeOp = view.getUint32(offset + 12, true);
+          const r = view.getFloat64(offset + 16, true);
+          const g = view.getFloat64(offset + 24, true);
+          const b = view.getFloat64(offset + 32, true);
+          const a = view.getFloat64(offset + 40, true);
+          let textureView;
+          if (texViewId === 0) {
+            const context = gpuRegistry.get(encoder._contextId || encoder.device?._contextId);
+            textureView = context.getCurrentTexture().createView();
+          } else {
+            textureView = gpuRegistry.get(texViewId);
+          }
+          colorAttachments.push({
+            view: textureView,
+            resolveTarget: resolveTargetId ? gpuRegistry.get(resolveTargetId) : undefined,
+            clearValue: { r, g, b, a },
+            loadOp: loadOp === 1 ? 'clear' : 'load',
+            storeOp: storeOp === 1 ? 'store' : 'discard'
+          });
+        }
+        const pass = encoder.beginRenderPass({ colorAttachments });
+        return regGpu(pass);
+      },
+
+      wgpuRenderPassEncoderEnd: (passId: number) => {
+        const pass = gpuRegistry.get(passId);
+        pass.end();
+        gpuRegistry.delete(passId);
+      },
     },
     
-    // ─── WASI Snapshot Preview 1 Specification Host ──────────────────────
     wasi_snapshot_preview1: {
       proc_exit: (code: number) => {
         throw new Error(`Exit code: ${code}`);
@@ -467,8 +657,1090 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
   
   const { instance } = await WebAssembly.instantiate(buffer, imports);
   wasmInstance = instance;
+  exports = instance.exports;
 }
 
 export function getExports(): WebAssembly.Exports {
-  return wasmInstance.exports;
+  return exports;
 }
+const registry = new FinalizationRegistry((info: { ptr: number, type: string }) => {
+  if (!exports) return;
+  if (info.type === 'Collection::VarLongResult') exports.export_Collection_VarLongResult_delete(info.ptr);
+  if (info.type === 'Collection::String') exports.export_Collection_String_delete(info.ptr);
+  if (info.type === 'Collection::VarStringResult') exports.export_Collection_VarStringResult_delete(info.ptr);
+  if (info.type === 'Xi::Deserializer') exports.export_Xi_Deserializer_delete(info.ptr);
+  if (info.type === 'Xi::IMemoryDevice') exports.export_Xi_IMemoryDevice_delete(info.ptr);
+  if (info.type === 'Xi::MemoryDevice') exports.export_Xi_MemoryDevice_delete(info.ptr);
+  if (info.type === 'Array_u8') exports.export_Array_u8_delete(info.ptr);
+  if (info.type === 'Array_String') exports.export_Array_String_delete(info.ptr);
+});
+
+function writeString(str: string): number {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(str);
+  const ptr = exports.alloc_buf(bytes.length + 1);
+  const view = new Uint8Array(exports.memory.buffer, ptr, bytes.length + 1);
+  view.set(bytes);
+  view[bytes.length] = 0;
+  return ptr;
+}
+
+function writeBuffer(buf: Uint8Array | string): { ptr: number, len: number } {
+  const bytes = typeof buf === 'string' ? new TextEncoder().encode(buf) : buf;
+  const ptr = exports.alloc_buf(bytes.length);
+  const view = new Uint8Array(exports.memory.buffer, ptr, bytes.length);
+  view.set(bytes);
+  return { ptr, len: bytes.length };
+}
+
+function readString(ptr: number): string {
+  const view = new Uint8Array(exports.memory.buffer, ptr);
+  let len = 0;
+  while (view[len] !== 0) len++;
+  const bytes = new Uint8Array(exports.memory.buffer, ptr, len);
+  return new TextDecoder().decode(bytes);
+}
+
+function readBinaryString(ptr: number, size: number): string {
+  const bytes = new Uint8Array(exports.memory.buffer, ptr, size);
+  let res = '';
+  for (let i = 0; i < bytes.length; ++i) res += String.fromCharCode(bytes[i]);
+  return res;
+}
+
+export class Array_u8 {
+  ptr: number;
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor();
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Array_u8' }, this);
+      }
+    } else {
+      this.ptr = exports.export_Array_u8_new();
+      registry.register(this, { ptr: this.ptr, type: 'Array_u8' }, this);
+    }
+  }
+
+  push(val: number): void {
+    exports.export_Array_u8_push(this.ptr, val);
+  }
+
+  size(): number {
+    return exports.export_Array_u8_size(this.ptr);
+  }
+
+  get(index: number): number {
+    return exports.export_Array_u8_get(this.ptr, index);
+  }
+
+  delete(): void {
+    if (this.ptr) {
+      registry.unregister(this);
+      exports.export_Array_u8_delete(this.ptr);
+      this.ptr = 0;
+    }
+  }
+
+  toJS(): number[] {
+    const arr: number[] = [];
+    const sz = this.size();
+    for (let i = 0; i < sz; ++i) {
+      arr.push(this.get(i));
+    }
+    return arr;
+  }
+
+  static fromJS(arr: number[]): Array_u8 {
+   const res = new Array_u8(); for (const item of arr) {
+                res.push(item);
+            }
+            return res;  }}
+
+export class Array_String {
+  ptr: number;
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor();
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Array_String' }, this);
+      }
+    } else {
+      this.ptr = exports.export_Array_String_new();
+      registry.register(this, { ptr: this.ptr, type: 'Array_String' }, this);
+    }
+  }
+
+  push(val: string): void {
+    const p = writeString(val);
+    exports.export_Array_String_push(this.ptr, p);
+    exports.free_buf(p);
+  }
+
+  size(): number {
+    return exports.export_Array_String_size(this.ptr);
+  }
+
+  get(index: number): string {
+    return readString(exports.export_Array_String_get(this.ptr, index));
+  }
+
+  delete(): void {
+    if (this.ptr) {
+      registry.unregister(this);
+      exports.export_Array_String_delete(this.ptr);
+      this.ptr = 0;
+    }
+  }
+
+  toJS(): string[] {
+    const arr: string[] = [];
+    const sz = this.size();
+    for (let i = 0; i < sz; ++i) {
+      arr.push(this.get(i));
+    }
+    return arr;
+  }
+
+  static fromJS(arr: string[]): Array_String {
+   const res = new Array_String(); for (const item of arr) {
+                res.push(item);
+            }
+            return res;  }}
+
+/**
+ * @struct VarLongResult
+ * @brief Result of a variable-length integer decoding operation.
+ */
+export class VarLongResult {
+  ptr: number;
+
+  constructor();
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Collection::VarLongResult' }, this);
+      }
+    } else {
+      if (args.length === 0) {
+        this.ptr = exports.export_Collection_VarLongResult_new_default();
+        registry.register(this, { ptr: this.ptr, type: 'Collection::VarLongResult' }, this);
+        return;
+      }
+      throw new Error('No constructor overload matched given arguments');
+    }
+  }
+
+  /**
+   * < Decoded integer value.
+   */
+  get bytes(): number {
+    return exports.export_Collection_VarLongResult_get_bytes(this.ptr);
+  }
+
+  set bytes(val: number) {
+    exports.export_Collection_VarLongResult_set_bytes(this.ptr, val);
+  }
+
+  /**
+   * < Number of bytes consumed.
+   */
+  get error(): boolean {
+    return exports.export_Collection_VarLongResult_get_error(this.ptr) !== 0;
+  }
+
+  set error(val: boolean) {
+    exports.export_Collection_VarLongResult_set_error(this.ptr, val);
+  }
+
+  delete(): void {
+    if (this.ptr) {
+      registry.unregister(this);
+      exports.export_Collection_VarLongResult_delete(this.ptr);
+      this.ptr = 0;
+    }
+  }
+
+  static fromJS(obj: any): VarLongResult {
+    if (obj instanceof VarLongResult) return obj;
+    const res = new VarLongResult();
+    if (obj.bytes !== undefined) res.bytes = obj.bytes;
+    if (obj.error !== undefined) res.error = obj.error;
+    return res;
+  }
+
+}
+
+/**
+ * @class String
+ * @brief A mutable, COW-optimized string class inheriting from InlineArray<u8>.
+ * Provides high-level string manipulation (split, replace, trim),
+ * variable-length integer serialization, and numeric conversions.
+ */
+export class String {
+  ptr: number;
+
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+      }
+    } else {
+      if (args.length === 0) {
+        this.ptr = exports.export_Collection_String_new_0();
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && typeof args[0] === 'number') {
+        this.ptr = exports.export_Collection_String_new_1(args[0]);
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+        this.ptr = exports.export_Collection_String_new_2(args[0], args[1]);
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && typeof args[0] === 'string') {
+        const p0 = writeString(args[0]);
+        this.ptr = exports.export_Collection_String_new_3(p0);
+        exports.free_buf(p0);
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && typeof args[0] === 'string') {
+        const p0 = writeString(args[0]);
+        this.ptr = exports.export_Collection_String_new_4(p0);
+        exports.free_buf(p0);
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && (Array.isArray(args[0]) || args[0] instanceof Array_u8)) {
+        const p0 = args[0] instanceof Array_u8 ? args[0] : Array_u8.fromJS(args[0]);
+        const needsFree0 = !(args[0] instanceof Array_u8);
+        this.ptr = exports.export_Collection_String_new_5(p0.ptr);
+        if (needsFree0) p0.delete();
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && typeof args[0] === 'number') {
+        this.ptr = exports.export_Collection_String_new_6(args[0]);
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && typeof args[0] === 'number') {
+        this.ptr = exports.export_Collection_String_new_8(args[0]);
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      if (args.length === 1 && typeof args[0] === 'number') {
+        this.ptr = exports.export_Collection_String_new_9(BigInt(args[0]));
+        registry.register(this, { ptr: this.ptr, type: 'Collection::String' }, this);
+        return;
+      }
+      throw new Error('No constructor overload matched given arguments');
+    }
+  }
+
+  /**
+   * @brief Returns a null-terminated C-string pointer.
+   * @note May reallocate to add the null terminator.
+   */
+  c_str(): number;
+  c_str(): number;
+  c_str(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_c_str_16(this.ptr);
+      return readString(resPtr);
+    }
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_c_str_17(this.ptr);
+      return readString(resPtr);
+    }
+    throw new Error('No method overload of "c_str" matched given arguments');
+  }
+
+  /**
+   * @brief Returns a view/copy of a range as a String.
+   */
+  begin(from_: number, to: number): string;
+  begin(): string;
+  begin(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+      const resPtr = exports.export_Collection_String_begin_40(this.ptr, args[0], args[1]);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_begin_41(this.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "begin" matched given arguments');
+  }
+
+  toInt(): number;
+  toInt(...args: any[]): any {
+    if (args.length === 0) {
+      const res = exports.export_Collection_String_toInt_46(this.ptr);
+      return res;
+    }
+    throw new Error('No method overload of "toInt" matched given arguments');
+  }
+
+  shiftBool(): boolean;
+  shiftBool(...args: any[]): any {
+    if (args.length === 0) {
+      const res = exports.export_Collection_String_shiftBool_56(this.ptr);
+      return res !== 0;
+    }
+    throw new Error('No method overload of "shiftBool" matched given arguments');
+  }
+
+  charAt(idx: number): number;
+  charAt(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const res = exports.export_Collection_String_charAt_34(this.ptr, args[0]);
+      return res;
+    }
+    throw new Error('No method overload of "charAt" matched given arguments');
+  }
+
+  shiftVarString(): string;
+  shiftVarString(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_shiftVarString_54(this.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "shiftVarString" matched given arguments');
+  }
+
+  /**
+   * @brief Splits the string by a separator string.
+   */
+  split(sep: string): string[];
+  split(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeString(args[0]);
+      const resPtr = exports.export_Collection_String_split_43(this.ptr, p0);
+      exports.free_buf(p0);
+      const wrapper = new Array_String(resPtr, INTERNAL, true);
+      const jsVal = wrapper.toJS();
+      wrapper.delete();
+      return jsVal;
+    }
+    throw new Error('No method overload of "split" matched given arguments');
+  }
+
+  length(): number;
+  length(...args: any[]): any {
+    if (args.length === 0) {
+      const res = exports.export_Collection_String_length_18(this.ptr);
+      return res;
+    }
+    throw new Error('No method overload of "length" matched given arguments');
+  }
+
+  from(s: number): string;
+  from(buf: number): string;
+  from(s: string): string;
+  from(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const resPtr = exports.export_Collection_String_from_20(args[0]);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeBuffer(args[0]);
+      const resPtr = exports.export_Collection_String_from_21(p0.ptr, p0.len);
+      exports.free_buf(p0.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeString(args[0]);
+      const resPtr = exports.export_Collection_String_from_22(p0);
+      exports.free_buf(p0);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "from" matched given arguments');
+  }
+
+  pushVarString(s: string): void;
+  pushVarString(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeString(args[0]);
+      exports.export_Collection_String_pushVarString_53(this.ptr, p0);
+      exports.free_buf(p0);
+      return;
+    }
+    throw new Error('No method overload of "pushVarString" matched given arguments');
+  }
+
+  toUpperCase(): string;
+  toUpperCase(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_toUpperCase_32(this.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "toUpperCase" matched given arguments');
+  }
+
+  padEnd(targetLen: number, padChar: number): string;
+  padEnd(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+      const resPtr = exports.export_Collection_String_padEnd_37(this.ptr, args[0], args[1]);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "padEnd" matched given arguments');
+  }
+
+  includes(needle: string, start: number): boolean;
+  includes(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'string' && typeof args[1] === 'number') {
+      const p0 = writeString(args[0]);
+      const res = exports.export_Collection_String_includes_26(this.ptr, p0, args[1]);
+      exports.free_buf(p0);
+      return res !== 0;
+    }
+    throw new Error('No method overload of "includes" matched given arguments');
+  }
+
+  create(): string;
+  create(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_create_38();
+      return new String(resPtr, INTERNAL, false);
+    }
+    throw new Error('No method overload of "create" matched given arguments');
+  }
+
+  /**
+   * @brief Returns decimal representation of a binary string.
+   */
+  toDeci(): string;
+  toDeci(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_toDeci_69(this.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "toDeci" matched given arguments');
+  }
+
+  /**
+   * @brief Returns a substring.
+   */
+  substring(start: number, end: number): string;
+  substring(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+      const resPtr = exports.export_Collection_String_substring_30(this.ptr, args[0], args[1]);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "substring" matched given arguments');
+  }
+
+  startsWith(prefix: string): boolean;
+  startsWith(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeString(args[0]);
+      const res = exports.export_Collection_String_startsWith_27(this.ptr, p0);
+      exports.free_buf(p0);
+      return res !== 0;
+    }
+    throw new Error('No method overload of "startsWith" matched given arguments');
+  }
+
+  check_abi(): void;
+  check_abi(...args: any[]): any {
+    if (args.length === 0) {
+      exports.export_Collection_String_check_abi_70();
+      return;
+    }
+    throw new Error('No method overload of "check_abi" matched given arguments');
+  }
+
+  /**
+   * @brief Removes whitespace from both ends.
+   */
+  trim(): string;
+  trim(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_trim_31(this.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "trim" matched given arguments');
+  }
+
+  unshiftVarLong(): string;
+  unshiftVarLong(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_unshiftVarLong_52(this.ptr);
+      return new String(resPtr, INTERNAL, false);
+    }
+    throw new Error('No method overload of "unshiftVarLong" matched given arguments');
+  }
+
+  peekI32(offset: number): number;
+  peekI32(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const res = exports.export_Collection_String_peekI32_61(this.ptr, args[0]);
+      return res;
+    }
+    throw new Error('No method overload of "peekI32" matched given arguments');
+  }
+
+  /**
+   * @brief Decodes a VarString at an offset without moving indices.
+   */
+  peekVarString(offset: number): VarStringResult;
+  peekVarString(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const resPtr = exports.export_Collection_String_peekVarString_68(this.ptr, args[0]);
+      return new VarStringResult(resPtr, INTERNAL, true);
+    }
+    throw new Error('No method overload of "peekVarString" matched given arguments');
+  }
+
+  concat(other: string): void;
+  concat(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeString(args[0]);
+      exports.export_Collection_String_concat_13(this.ptr, p0);
+      exports.free_buf(p0);
+      return;
+    }
+    throw new Error('No method overload of "concat" matched given arguments');
+  }
+
+  toLowerCase(): string;
+  toLowerCase(...args: any[]): any {
+    if (args.length === 0) {
+      const resPtr = exports.export_Collection_String_toLowerCase_33(this.ptr);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "toLowerCase" matched given arguments');
+  }
+
+  isEmpty(): boolean;
+  isEmpty(...args: any[]): any {
+    if (args.length === 0) {
+      const res = exports.export_Collection_String_isEmpty_19(this.ptr);
+      return res !== 0;
+    }
+    throw new Error('No method overload of "isEmpty" matched given arguments');
+  }
+
+  /**
+   * @brief Decodes a VarLong at an offset without moving indices.
+   */
+  peekVarLong(offset: number): VarLongResult;
+  peekVarLong(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const resPtr = exports.export_Collection_String_peekVarLong_67(this.ptr, args[0]);
+      return new VarLongResult(resPtr, INTERNAL, true);
+    }
+    throw new Error('No method overload of "peekVarLong" matched given arguments');
+  }
+
+  /**
+   * @brief Fills the string with a specific character.
+   */
+  fill(val: number): void;
+  fill(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      exports.export_Collection_String_fill_23(this.ptr, args[0]);
+      return;
+    }
+    throw new Error('No method overload of "fill" matched given arguments');
+  }
+
+  padStart(targetLen: number, padChar: number): string;
+  padStart(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+      const resPtr = exports.export_Collection_String_padStart_36(this.ptr, args[0], args[1]);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "padStart" matched given arguments');
+  }
+
+  /**
+   * @brief Replaces occurrences of a substring with another string.
+   */
+  replace(tgt: string, rep: string): string;
+  replace(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'string' && typeof args[1] === 'string') {
+      const p0 = writeString(args[0]);
+      const p1 = writeString(args[1]);
+      const resPtr = exports.export_Collection_String_replace_45(this.ptr, p0, p1);
+      exports.free_buf(p0);
+      exports.free_buf(p1);
+      const strVal = readString(exports.export_String_c_str(resPtr));
+      exports.export_String_delete(resPtr);
+      return strVal;
+    }
+    throw new Error('No method overload of "replace" matched given arguments');
+  }
+
+  pushI32(v: number): string;
+  pushI32(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const resPtr = exports.export_Collection_String_pushI32_59(this.ptr, args[0]);
+      return new String(resPtr, INTERNAL, false);
+    }
+    throw new Error('No method overload of "pushI32" matched given arguments');
+  }
+
+  pushBool(v: boolean): string;
+  pushBool(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'boolean') {
+      const resPtr = exports.export_Collection_String_pushBool_55(this.ptr, args[0]);
+      return new String(resPtr, INTERNAL, false);
+    }
+    throw new Error('No method overload of "pushBool" matched given arguments');
+  }
+
+  /**
+   * @brief Clears the string content.
+   */
+  clear(): void;
+  clear(...args: any[]): any {
+    if (args.length === 0) {
+      exports.export_Collection_String_clear_15(this.ptr);
+      return;
+    }
+    throw new Error('No method overload of "clear" matched given arguments');
+  }
+
+  endsWith(suffix: string): boolean;
+  endsWith(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'string') {
+      const p0 = writeString(args[0]);
+      const res = exports.export_Collection_String_endsWith_28(this.ptr, p0);
+      exports.free_buf(p0);
+      return res !== 0;
+    }
+    throw new Error('No method overload of "endsWith" matched given arguments');
+  }
+
+  /**
+   * @brief Constant-time equality check for cryptographic use.
+   */
+  constantTimeEquals(b: string, length: number): boolean;
+  constantTimeEquals(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'string' && typeof args[1] === 'number') {
+      const p0 = writeString(args[0]);
+      const res = exports.export_Collection_String_constantTimeEquals_48(this.ptr, p0, args[1]);
+      exports.free_buf(p0);
+      return res !== 0;
+    }
+    throw new Error('No method overload of "constantTimeEquals" matched given arguments');
+  }
+
+  shiftI32(): number;
+  shiftI32(...args: any[]): any {
+    if (args.length === 0) {
+      const res = exports.export_Collection_String_shiftI32_60(this.ptr);
+      return res;
+    }
+    throw new Error('No method overload of "shiftI32" matched given arguments');
+  }
+
+  charCodeAt(idx: number): number;
+  charCodeAt(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const res = exports.export_Collection_String_charCodeAt_35(this.ptr, args[0]);
+      return res;
+    }
+    throw new Error('No method overload of "charCodeAt" matched given arguments');
+  }
+
+  delete(): void {
+    if (this.ptr) {
+      registry.unregister(this);
+      exports.export_Collection_String_delete(this.ptr);
+      this.ptr = 0;
+    }
+  }
+
+  static fromJS(obj: any): String {
+    if (obj instanceof String) return obj;
+    const res = new String();
+    return res;
+  }
+
+}
+
+/**
+ * @struct VarStringResult
+ * @brief Result of a variable-length string decoding/peeking operation.
+ */
+export class VarStringResult {
+  ptr: number;
+
+  constructor();
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Collection::VarStringResult' }, this);
+      }
+    } else {
+      if (args.length === 0) {
+        this.ptr = exports.export_Collection_VarStringResult_new_default();
+        registry.register(this, { ptr: this.ptr, type: 'Collection::VarStringResult' }, this);
+        return;
+      }
+      throw new Error('No constructor overload matched given arguments');
+    }
+  }
+
+  get value(): string {
+    return readString(exports.export_Collection_VarStringResult_get_value(this.ptr));
+  }
+
+  set value(val: string) {
+    const ptr = writeString(val);
+    exports.export_Collection_VarStringResult_set_value(this.ptr, ptr);
+    exports.free_buf(ptr);
+  }
+
+  /**
+   * < Decoded string value.
+   */
+  get bytes(): number {
+    return exports.export_Collection_VarStringResult_get_bytes(this.ptr);
+  }
+
+  set bytes(val: number) {
+    exports.export_Collection_VarStringResult_set_bytes(this.ptr, val);
+  }
+
+  /**
+   * < Number of bytes consumed.
+   */
+  get error(): boolean {
+    return exports.export_Collection_VarStringResult_get_error(this.ptr) !== 0;
+  }
+
+  set error(val: boolean) {
+    exports.export_Collection_VarStringResult_set_error(this.ptr, val);
+  }
+
+  delete(): void {
+    if (this.ptr) {
+      registry.unregister(this);
+      exports.export_Collection_VarStringResult_delete(this.ptr);
+      this.ptr = 0;
+    }
+  }
+
+  static fromJS(obj: any): VarStringResult {
+    if (obj instanceof VarStringResult) return obj;
+    const res = new VarStringResult();
+    if (obj.value !== undefined) res.value = obj.value;
+    if (obj.bytes !== undefined) res.bytes = obj.bytes;
+    if (obj.error !== undefined) res.error = obj.error;
+    return res;
+  }
+
+}
+
+/**
+ * @brief Helper for deserialize inference.
+ */
+export class Deserializer {
+  ptr: number;
+
+  constructor();
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Xi::Deserializer' }, this);
+      }
+    } else {
+      if (args.length === 0) {
+        this.ptr = exports.export_Xi_Deserializer_new_default();
+        registry.register(this, { ptr: this.ptr, type: 'Xi::Deserializer' }, this);
+        return;
+      }
+      throw new Error('No constructor overload matched given arguments');
+    }
+  }
+
+  get data(): string {
+    return readString(exports.export_Xi_Deserializer_get_data(this.ptr));
+  }
+
+  set data(val: string) {
+    const ptr = writeString(val);
+    exports.export_Xi_Deserializer_set_data(this.ptr, ptr);
+    exports.free_buf(ptr);
+  }
+
+  delete(): void {
+    if (this.ptr) {
+      registry.unregister(this);
+      exports.export_Xi_Deserializer_delete(this.ptr);
+      this.ptr = 0;
+    }
+  }
+
+  static fromJS(obj: any): Deserializer {
+    if (obj instanceof Deserializer) return obj;
+    const res = new Deserializer();
+    if (obj.data !== undefined) res.data = obj.data;
+    return res;
+  }
+
+}
+
+/**
+ * @class IMemoryDevice
+ * @brief Interface for memory management devices (CPU/GPU).
+ */
+export class IMemoryDevice {
+  ptr: number;
+
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: this.ptr, type: 'Xi::IMemoryDevice' }, this);
+      }
+    } else {
+      throw new Error('Cannot instantiate abstract class Xi::IMemoryDevice');
+    }
+  }
+
+  free(handle: void): void;
+  free(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      exports.export_Xi_IMemoryDevice_free_1(this.ptr, args[0]);
+      return;
+    }
+    throw new Error('No method overload of "free" matched given arguments');
+  }
+
+  allocSurface(w: number, h: number, channels: number): void;
+  allocSurface(...args: any[]): any {
+    if (args.length === 3 && typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+      const res = exports.export_Xi_IMemoryDevice_allocSurface_5(this.ptr, args[0], args[1], args[2]);
+      return res;
+    }
+    throw new Error('No method overload of "allocSurface" matched given arguments');
+  }
+
+  view(handle: void, type_: number): void;
+  view(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+      const res = exports.export_Xi_IMemoryDevice_view_4(this.ptr, args[0], args[1]);
+      return res;
+    }
+    throw new Error('No method overload of "view" matched given arguments');
+  }
+
+  upload(handle: void, src: void, size: number): void;
+  upload(...args: any[]): any {
+    if (args.length === 3 && typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+      exports.export_Xi_IMemoryDevice_upload_2(this.ptr, args[0], args[1], args[2]);
+      return;
+    }
+    throw new Error('No method overload of "upload" matched given arguments');
+  }
+
+  alloc(size: number): void;
+  alloc(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const res = exports.export_Xi_IMemoryDevice_alloc_0(this.ptr, args[0]);
+      return res;
+    }
+    throw new Error('No method overload of "alloc" matched given arguments');
+  }
+
+  download(handle: void, dst: void, size: number): void;
+  download(...args: any[]): any {
+    if (args.length === 3 && typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+      exports.export_Xi_IMemoryDevice_download_3(this.ptr, args[0], args[1], args[2]);
+      return;
+    }
+    throw new Error('No method overload of "download" matched given arguments');
+  }
+
+}
+
+export class MemoryDevice extends IMemoryDevice {
+  constructor(ptr: number, internal: symbol, owner?: boolean);
+  constructor(...args: any[]) {
+    if (args.length >= 2 && args[1] === INTERNAL) {
+      super(args[0], INTERNAL, false);
+      this.ptr = args[0];
+      const owned = args[2] !== false;
+      if (owned) {
+        registry.register(this, { ptr: args[0], type: 'Xi::MemoryDevice' }, this);
+      }
+    } else {
+      throw new Error('Cannot instantiate abstract class Xi::MemoryDevice');
+    }
+  }
+
+  free(handle: void): void;
+  free(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      exports.export_Xi_MemoryDevice_free_1(this.ptr, args[0]);
+      return;
+    }
+    throw new Error('No method overload of "free" matched given arguments');
+  }
+
+  allocSurface(w: number, h: number, channels: number): void;
+  allocSurface(...args: any[]): any {
+    if (args.length === 3 && typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+      const res = exports.export_Xi_MemoryDevice_allocSurface_5(this.ptr, args[0], args[1], args[2]);
+      return res;
+    }
+    throw new Error('No method overload of "allocSurface" matched given arguments');
+  }
+
+  view(handle: void, type_: number): void;
+  view(...args: any[]): any {
+    if (args.length === 2 && typeof args[0] === 'number' && typeof args[1] === 'number') {
+      const res = exports.export_Xi_MemoryDevice_view_4(this.ptr, args[0], args[1]);
+      return res;
+    }
+    throw new Error('No method overload of "view" matched given arguments');
+  }
+
+  upload(handle: void, src: void, size: number): void;
+  upload(...args: any[]): any {
+    if (args.length === 3 && typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+      exports.export_Xi_MemoryDevice_upload_2(this.ptr, args[0], args[1], args[2]);
+      return;
+    }
+    throw new Error('No method overload of "upload" matched given arguments');
+  }
+
+  alloc(size: number): void;
+  alloc(...args: any[]): any {
+    if (args.length === 1 && typeof args[0] === 'number') {
+      const res = exports.export_Xi_MemoryDevice_alloc_0(this.ptr, args[0]);
+      return res;
+    }
+    throw new Error('No method overload of "alloc" matched given arguments');
+  }
+
+  download(handle: void, dst: void, size: number): void;
+  download(...args: any[]): any {
+    if (args.length === 3 && typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+      exports.export_Xi_MemoryDevice_download_3(this.ptr, args[0], args[1], args[2]);
+      return;
+    }
+    throw new Error('No method overload of "download" matched given arguments');
+  }
+
+}
+
+/**
+ * Helpers for VarLong IO in networking
+ */
+export function writeVarLong(s: string, v: number): void;
+export function writeVarLong(...args: any[]): any {
+  if (args.length === 2 && typeof args[0] === 'string' && typeof args[1] === 'number') {
+    const p0 = writeString(args[0]);
+    exports.export_Xi_writeVarLong_1(p0, BigInt(args[1]));
+    exports.free_buf(p0);
+    return;
+  }
+  throw new Error('No overload of "writeVarLong" matched given arguments');
+}
+
+/**
+ * Functions for numeric parsing
+ */
+export function parseInt(s: string): number;
+export function parseInt(...args: any[]): any {
+  if (args.length === 1 && typeof args[0] === 'string') {
+    const p0 = writeString(args[0]);
+    const res = exports.export_Collection_parseInt_0(p0);
+    exports.free_buf(p0);
+    return res;
+  }
+  throw new Error('No overload of "parseInt" matched given arguments');
+}
+
+/**
+ * @brief Mixes a hash value for better distribution.
+ */
+export function fnvHashMix(k: number): number;
+export function fnvHashMix(...args: any[]): any {
+  if (args.length === 1 && typeof args[0] === 'number') {
+    const res = exports.export_Xi_fnvHashMix_2(args[0]);
+    return res;
+  }
+  throw new Error('No overload of "fnvHashMix" matched given arguments');
+}
+
+/**
+ * @brief Returns current time in milliseconds.
+ */
+export function millis(): number;
+export function millis(...args: any[]): any {
+  if (args.length === 0) {
+    const res = exports.export_Xi_millis_3();
+    return res;
+  }
+  throw new Error('No overload of "millis" matched given arguments');
+}
+
+/**
+ * @brief Returns current time in microseconds.
+ */
+export function micros(): number;
+export function micros(...args: any[]): any {
+  if (args.length === 0) {
+    const res = exports.export_Xi_micros_4();
+    return res;
+  }
+  throw new Error('No overload of "micros" matched given arguments');
+}
+

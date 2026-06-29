@@ -36,7 +36,7 @@ static String getWasiSdkDir() {
   const char *home = ::getenv("HOME");
   if (!home)
     return "";
-  return String(home) + "/.cache/sew/wasi-sdk";
+  return String(home) + "/.cache/wasi-sdk";
 }
 
 static bool ensureWasiSdk() {
@@ -1026,10 +1026,12 @@ static bool containsToken(const String &source, const String &token) {
 static void collectParentClassesRecursive(const ParsedClass &cls,
                                           const Array<ParsedClass> &classes,
                                           Array<ParsedClass> &outFiltered,
-                                          Map<String, bool> &seen) {
+                                          Map<String, bool> &seen,
+                                          const Map<String, bool> &definedClasses) {
   for (usz p = 0; p < cls.parentClasses.size(); ++p) {
     const String &parentName = cls.parentClasses[p];
     for (usz j = 0; j < classes.size(); ++j) {
+      if (!definedClasses.has(classes[j].name)) continue; // Must be complete!
       bool match = (classes[j].name == parentName);
       if (!match) {
         long long lastColon = -1;
@@ -1049,7 +1051,7 @@ static void collectParentClassesRecursive(const ParsedClass &cls,
       if (match && !seen.has(classes[j].name)) {
         seen.set(classes[j].name, true);
         outFiltered.push(classes[j]);
-        collectParentClassesRecursive(classes[j], classes, outFiltered, seen);
+        collectParentClassesRecursive(classes[j], classes, outFiltered, seen, definedClasses);
         break;
       }
     }
@@ -1059,7 +1061,8 @@ static void collectParentClassesRecursive(const ParsedClass &cls,
 static void collectFieldTypesRecursive(const ParsedClass &cls,
                                        const Array<ParsedClass> &classes,
                                        Array<ParsedClass> &outFiltered,
-                                       Map<String, bool> &seen) {
+                                       Map<String, bool> &seen,
+                                       const Map<String, bool> &definedClasses) {
   for (usz f = 0; f < cls.fields.size(); ++f) {
     String cleanTypeName = cls.fields[f].type;
     if (cleanTypeName.endsWith("&"))
@@ -1072,6 +1075,7 @@ static void collectFieldTypesRecursive(const ParsedClass &cls,
       cleanTypeName = cleanTypeName.substring(5).trim();
 
     for (usz j = 0; j < classes.size(); ++j) {
+      if (!definedClasses.has(classes[j].name)) continue; // Must be complete!
       bool match = (classes[j].name == cleanTypeName);
       if (!match) {
         long long lastColon = -1;
@@ -1091,7 +1095,7 @@ static void collectFieldTypesRecursive(const ParsedClass &cls,
       if (match && !seen.has(classes[j].name)) {
         seen.set(classes[j].name, true);
         outFiltered.push(classes[j]);
-        collectFieldTypesRecursive(classes[j], classes, outFiltered, seen);
+        collectFieldTypesRecursive(classes[j], classes, outFiltered, seen, definedClasses);
         break;
       }
     }
@@ -1099,14 +1103,14 @@ static void collectFieldTypesRecursive(const ParsedClass &cls,
 }
 
 static String rewriteCppSource(const String &source,
-                               const Array<ParsedClass> &classes) {
+                               const Array<ParsedClass> &classes,
+                               const Map<String, bool> &definedClasses) {
   String content = source;
 
   // 1. Detect global variables
   Array<DetectedVar> globalVars = detectGlobalVars(content, classes);
 
-  // Rename declarations and insert registration helpers (in reverse order to
-  // preserve indices)
+  // Rename declarations and insert registration helpers (in reverse order to preserve indices)
   for (long long j = (long long)globalVars.size() - 1; j >= 0; --j) {
     const auto &var = globalVars[(usz)j];
 
@@ -1139,9 +1143,9 @@ static String rewriteCppSource(const String &source,
   Array<ParsedClass> filteredClasses;
   Map<String, bool> seen;
 
-  // First, find all classes used directly in the code
+  // First, find all classes defined and used directly in the code
   for (usz i = 0; i < classes.size(); ++i) {
-    if (containsToken(content, classes[i].name)) {
+    if (definedClasses.has(classes[i].name) && containsToken(content, classes[i].name)) {
       seen.set(classes[i].name, true);
       filteredClasses.push(classes[i]);
     }
@@ -1151,14 +1155,14 @@ static String rewriteCppSource(const String &source,
   usz origSize = filteredClasses.size();
   for (usz i = 0; i < origSize; ++i) {
     collectParentClassesRecursive(filteredClasses[i], classes, filteredClasses,
-                                  seen);
+                                  seen, definedClasses);
   }
 
   // Third, recursively collect all member field types of the collected classes
   usz newSize = filteredClasses.size();
   for (usz i = 0; i < newSize; ++i) {
     collectFieldTypesRecursive(filteredClasses[i], classes, filteredClasses,
-                               seen);
+                               seen, definedClasses);
   }
 
   String finalSource;
@@ -1169,7 +1173,6 @@ static String rewriteCppSource(const String &source,
 
   return finalSource;
 }
-
 Array<ImportSpec> CppLanguage::parseImports(const String &source,
                                             const String &filePath) {
   PreprocessorResult ppResult = _preprocessor.process(source, filePath);
@@ -1384,7 +1387,19 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
     std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
     classesCopy = g_allParsedClasses;
   }
-  String rewritten = rewriteCppSource(req.sourceContent, classesCopy);
+
+  // Preprocess first to parse the local classes that are fully defined in this TU
+  PreprocessorResult ppResult = _preprocessor.process(req.sourceContent, req.sourcePath);
+  CppHeaderParser localParser;
+  localParser.parse(ppResult.strippedSource);
+
+  Map<String, bool> definedClasses;
+  for (usz i = 0; i < localParser.classes.size(); ++i) {
+    definedClasses.set(localParser.classes[i].name, true);
+  }
+
+
+  String rewritten = rewriteCppSource(req.sourceContent, classesCopy, definedClasses);
 
   String safePath = req.sourcePath;
   safePath = safePath.replace("/", "_");

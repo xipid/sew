@@ -26,7 +26,7 @@
     <canvas id="myCustomCanvas" width="640" height="480"></canvas>
 
     <script type="module">
-        import { init, getExports } from "./index.js";
+        import { init, getExports } from "./index.ts";
 
         async function main() {
             await init("./index.wasm", ["myCustomCanvas"]);

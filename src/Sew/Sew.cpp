@@ -785,11 +785,13 @@ void Engine::find(const String& targetName) {
         }
 
         // Add sew_qjs_bindings.cpp and sew_bridge.js only if JS target is involved or isRepl is true
-        bool hasJs = false;
-        for (usz i = 0; i < _graph.nodes.size(); ++i) {
-            if (_graph.nodes[i].language == "js") {
-                hasJs = true;
-                break;
+        bool hasJs = (targetName == "js" || targetName == "ts");
+        if (!hasJs) {
+            for (usz i = 0; i < _graph.nodes.size(); ++i) {
+                if (_graph.nodes[i].language == "js" || _graph.nodes[i].language == "ts") {
+                    hasJs = true;
+                    break;
+                }
             }
         }
 

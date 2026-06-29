@@ -280,23 +280,23 @@ static void expandGlob(const String& pattern, Array<String>& outFiles) {
     }
 }
 
-static void seedXylemCoreSources(const String& xylemRoot, Array<String>& sources) {
-    if (xylemRoot.isEmpty()) return;
+// static void seedXylemCoreSources(const String& xylemRoot, Array<String>& sources) {
+//     if (xylemRoot.isEmpty()) return;
 
-    const char* names[] = {
-        "Allocator", "BlobStore", "BlockDevice", "Cache", "Journal",
-        "QueryParser", "TableStore", "XBDiff", "Xylem", "Watcher", nullptr
-    };
+//     const char* names[] = {
+//         "Allocator", "BlobStore", "BlockDevice", "Cache", "Journal",
+//         "QueryParser", "TableStore", "XBDiff", "Xylem", "Watcher", nullptr
+//     };
 
-    for (int i = 0; names[i]; ++i) {
-        String src = xylemRoot + "/src/Xylem/";
-        src += names[i];
-        src += ".cpp";
-        if (fileExists(src) && !containsPath(sources, src)) {
-            sources.push(src);
-        }
-    }
-}
+//     for (int i = 0; names[i]; ++i) {
+//         String src = xylemRoot + "/src/Xylem/";
+//         src += names[i];
+//         src += ".cpp";
+//         if (fileExists(src) && !containsPath(sources, src)) {
+//             sources.push(src);
+//         }
+//     }
+// }
 
 static bool ensureWasiSdkInstalled() {
     const char* home = ::getenv("HOME");
@@ -545,19 +545,19 @@ int main(int argc, char** argv) {
     }
 
     if (target == "js") {
-        String xylemRoot;
-        for (usz i = 0; i < includeDirs.size(); ++i) {
-            if (includeDirs[i].endsWith("/xylem/include") || includeDirs[i].endsWith("../xylem/include") || includeDirs[i].endsWith("xylem/include")) {
-                xylemRoot = includeDirs[i].substring(0, includeDirs[i].length() - 8);
-                break;
-            }
-        }
-        if (!xylemRoot.isEmpty()) {
-            String watcherCpp = xylemRoot + "/src/Xylem/Watcher.cpp";
-            if (fileExists(watcherCpp) && !containsPath(sources, watcherCpp)) {
-                sources.push(watcherCpp);
-            }
-        }
+    //     String xylemRoot;
+    //     for (usz i = 0; i < includeDirs.size(); ++i) {
+    //         if (includeDirs[i].endsWith("/xylem/include") || includeDirs[i].endsWith("../xylem/include") || includeDirs[i].endsWith("xylem/include")) {
+    //             xylemRoot = includeDirs[i].substring(0, includeDirs[i].length() - 8);
+    //             break;
+    //         }
+    //     }
+    //     if (!xylemRoot.isEmpty()) {
+    //         String watcherCpp = xylemRoot + "/src/Xylem/Watcher.cpp";
+    //         if (fileExists(watcherCpp) && !containsPath(sources, watcherCpp)) {
+    //             sources.push(watcherCpp);
+    //         }
+    //     }
 
         String sewRoot = parentDir(executableDir());
         if (!sewRoot.isEmpty()) {
@@ -567,7 +567,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        seedXylemCoreSources(xylemRoot, sources);
+        // seedXylemCoreSources(xylemRoot, sources);
     }
 
     if (sources.size() == 0 && stdinLang.length() == 0) {
@@ -576,11 +576,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (target == "js" || target == "wasm") {
-        if (!ensureWasiSdkInstalled()) {
-            return 1;
-        }
-    }
+    // if (target == "js" || target == "wasm") {
+    //     if (!ensureWasiSdkInstalled()) {
+    //         return 1;
+    //     }
+    // }
 
 
 
