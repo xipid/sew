@@ -811,10 +811,10 @@ static String getTempDir() {
 
     const char* home = ::getenv("HOME");
     if (home && home[0] != '\0') {
-        String tempDir = String(home) + "/.sew";
+        String tempDir = String(home) + "/.cache/sew";
         struct stat st;
         if (::stat(tempDir.c_str(), &st) != 0) {
-            ::mkdir(tempDir.c_str(), 0700);
+            ::mkdir(tempDir.c_str(), 0755);
         }
         return tempDir;
     }
@@ -880,7 +880,12 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
     return invokeClang(modReq, ppResult.strippedSource);
   }
 
-  String rewritten = rewriteCppSource(req.sourceContent, g_allParsedClasses);
+  Array<ParsedClass> classesCopy;
+  {
+      std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
+      classesCopy = g_allParsedClasses;
+  }
+  String rewritten = rewriteCppSource(req.sourceContent, classesCopy);
 
   String safePath = req.sourcePath;
   safePath = safePath.replace("/", "_");

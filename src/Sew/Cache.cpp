@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstdio>
+#include <mutex>
 
 extern "C" {
     void crypto_blake2b(unsigned char *hash, size_t hash_size, const unsigned char *msg, size_t msg_size);
@@ -26,6 +27,8 @@ using namespace Xi;
 static String getClangVersion() {
     static String s_version;
     static bool s_loaded = false;
+    static std::mutex s_mutex;
+    std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_loaded) {
         FILE* f = popen("clang++ --version 2>/dev/null", "r");
         if (f) {
@@ -43,6 +46,8 @@ static String getClangVersion() {
 static String getSewSelfMetadata() {
     static String s_meta;
     static bool s_loaded = false;
+    static std::mutex s_mutex;
+    std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_loaded) {
         char path[1024];
         ssize_t len = ::readlink("/proc/self/exe", path, sizeof(path) - 1);
@@ -79,6 +84,47 @@ String Cache::computeKey(
 {
     String combined;
     combined += hashContent(sourceContent);
+    combined += ":";
+    combined += targetName;
+    combined += ":";
+    
+    // Hash environment variables
+    const char* env1 = ::getenv("SEW_EXTRA_FLAGS");
+    if (env1) combined += env1;
+    combined += ":";
+    const char* env2 = ::getenv("SEW_XIC_INCLUDE");
+    if (env2) combined += env2;
+    combined += ":";
+    const char* env3 = ::getenv("SEW_EXTRA_INCLUDE");
+    if (env3) combined += env3;
+    combined += ":";
+    
+    // Hash compiler version
+    combined += getClangVersion();
+    combined += ":";
+    
+    // Hash sew self metadata
+    combined += getSewSelfMetadata();
+    
+    for (usz i = 0; i < flags.size(); ++i) {
+        combined += ":";
+        combined += flags[i];
+    }
+    for (usz i = 0; i < depHashes.size(); ++i) {
+        combined += ":";
+        combined += depHashes[i];
+    }
+    return hashContent(combined);
+}
+
+String Cache::computeKeyFromHash(
+    const String& contentHash,
+    const String& targetName,
+    const Array<String>& flags,
+    const Array<String>& depHashes)
+{
+    String combined;
+    combined += contentHash;
     combined += ":";
     combined += targetName;
     combined += ":";

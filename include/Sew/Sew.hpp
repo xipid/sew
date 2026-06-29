@@ -14,6 +14,12 @@
 #include <Sew/Cache.hpp>
 #include <Sew/EvalContext.hpp>
 #include <Xi/Func.hpp>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <vector>
+#include <utility>
+#include <atomic>
 
 namespace Sew {
 
@@ -58,7 +64,7 @@ public:
 
     // --- Pipeline ---
     void input(const String& name, const String& content);
-    void find();    ///< Discover all imports, build DAG, compute build plan
+    void find(const String& targetName = "");    ///< Discover all imports, build DAG, compute build plan
     bool build(const String& targetName);  ///< Execute the build plan
     void eval(const String& language);     ///< REPL/eval mode
     String evalCode(const String& code);  ///< Evaluate code in current eval context
@@ -93,6 +99,46 @@ private:
 
     /// Recursively discover all dependencies starting from a file.
     void discoverFile(const String& path);
+
+    // --- On-the-fly compilation ---
+    struct CompileTask {
+        usz nodeIdx;
+        String language;
+        CompileRequest req;
+        Array<String> depHashes;
+    };
+
+    std::mutex _compileMutex;
+    std::vector<std::thread> _compileThreads;
+    std::vector<CompileTask> _compileQueue;
+    std::condition_variable _compileCv;
+    bool _compileDone = false;
+    Array<CompileResult> _asyncCompileResults;
+    Array<usz> _asyncCompileNodeIndices;
+    bool _compileSuccess = true;
+    String _compileErrors;
+    std::atomic<usz> _discoveredCount{0};
+    std::atomic<usz> _compiledCount{0};
+
+    Target* _activeTarget = nullptr;
+    String _activeTargetName;
+
+    struct CachedFileEntry {
+        String path;
+        String language;
+        long long mtime = 0;
+        long long size = 0;
+        String contentHash;
+        Array<String> resolvedImports;
+    };
+    Map<String, CachedFileEntry> _cachedFiles;
+
+    void loadDepDb();
+    void saveDepDb();
+
+    void startCompileWorkers(Target* target, const String& targetName);
+    void stopCompileWorkers();
+    void queueCompile(usz nodeIdx, Target* target, const String& targetName);
 };
 
 } // namespace Sew

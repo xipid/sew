@@ -3,6 +3,7 @@
 #include <Collection/Array.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 
 namespace Sew {
 
@@ -87,5 +88,6 @@ inline CppHeaderParser parseFile(const String& filePath) {
 }
 
 extern Array<ParsedClass> g_allParsedClasses;
+extern std::mutex g_parsedClassesMutex;
 
 } // namespace Sew

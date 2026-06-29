@@ -77,10 +77,10 @@ static String getTempDir() {
 
     const char* home = ::getenv("HOME");
     if (home && home[0] != '\0') {
-        String tempDir = String(home) + "/.sew";
+        String tempDir = String(home) + "/.cache/sew";
         struct stat st;
         if (::stat(tempDir.c_str(), &st) != 0) {
-            ::mkdir(tempDir.c_str(), 0700);
+            ::mkdir(tempDir.c_str(), 0755);
         }
         return tempDir;
     }
@@ -217,12 +217,18 @@ String Engine::resolveImport(const ImportSpec& imp, const String& currentFile) {
     return canonicalize(res);
 }
 
+static bool getFileStat(const String& path, long long& mtime, long long& size) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0) {
+        mtime = (long long)st.st_mtime;
+        size = (long long)st.st_size;
+        return true;
+    }
+    return false;
+}
+
 void Engine::discoverFile(const String& rawPath) {
     String path = canonicalize(rawPath);
-    // if (path.includes("disassemble")) {
-    //     ::printf("DEBUG: discoverFile called for path: %s\n", path.c_str());
-    //     ::fflush(stdout);
-    // }
     if (_graph.hasNode(path)) return;
 
     String langName = detectLanguage(path);
@@ -231,20 +237,50 @@ void Engine::discoverFile(const String& rawPath) {
         return;
     }
 
-    // Read file content
+    Language** langPtr = _langsByName.get(langName);
+    Array<String> currentSearchPaths;
+    if (langPtr && langName == "cpp") {
+        Languages::CppLanguage* cppLang = dynamic_cast<Languages::CppLanguage*>(*langPtr);
+        if (cppLang) {
+            currentSearchPaths = cppLang->preprocessor().includePaths;
+        }
+    }
+
+    bool cacheHit = false;
+    Array<String> resolvedImports;
+    String contentHash;
+
+    long long mtime = 0, size = 0;
+    bool hasStat = getFileStat(path, mtime, size);
+    
+    CachedFileEntry* cachedEntry = _cachedFiles.get(path);
+    if (cachedEntry && hasStat && cachedEntry->mtime == mtime && cachedEntry->size == size && cachedEntry->language == langName) {
+        cacheHit = true;
+        contentHash = cachedEntry->contentHash;
+        resolvedImports = cachedEntry->resolvedImports;
+    }
+
     String content;
-    if (onRead) {
-        content = onRead(path);
+    if (!cacheHit) {
+        // Read file content
+        if (onRead) {
+            content = onRead(path);
+        }
+        if (content.isEmpty()) {
+            // File might not exist (e.g. candidate sibling) — skip silently
+            return;
+        }
+        contentHash = Cache::hashContent(content);
     }
 
-
-    if (content.isEmpty()) {
-        // File might not exist (e.g. candidate sibling) — skip silently
-        return;
+    usz nodeIdx;
+    {
+        std::lock_guard<std::mutex> lock(_compileMutex);
+        nodeIdx = _graph.addNode(path, langName);
+        _graph.nodes[nodeIdx].content = content;
+        _graph.nodes[nodeIdx].contentHash = contentHash;
     }
-
-    usz nodeIdx = _graph.addNode(path, langName);
-    _graph.nodes[nodeIdx].content = content;
+    _discoveredCount++;
 
     // If it's a C++ header file, infer and register its include root
     String ext;
@@ -256,7 +292,6 @@ void Engine::discoverFile(const String& rawPath) {
     if (langName == "cpp" && (ext == ".h" || ext == ".hpp" || ext == ".hxx")) {
         String includeRoot = inferIncludeRoot(path);
         if (!includeRoot.isEmpty()) {
-            Language** langPtr = _langsByName.get("cpp");
             if (langPtr) {
                 Languages::CppLanguage* cppLang = dynamic_cast<Languages::CppLanguage*>(*langPtr);
                 if (cppLang) {
@@ -275,56 +310,87 @@ void Engine::discoverFile(const String& rawPath) {
         }
     }
 
-    Language** langPtr = _langsByName.get(langName);
-    if (!langPtr) return;
-    Language* lang = *langPtr;
+    if (cacheHit) {
+        // Report progress
+        if (onProgress) {
+            std::lock_guard<std::mutex> lock(_compileMutex);
+            onProgress("Building", _compiledCount.load(), _discoveredCount.load());
+        }
+        for (usz i = 0; i < resolvedImports.size(); ++i) {
+            discoverFile(resolvedImports[i]);
+            {
+                std::lock_guard<std::mutex> lock(_compileMutex);
+                if (_graph.hasNode(resolvedImports[i])) {
+                    _graph.addEdge(nodeIdx, _graph.indexOf(resolvedImports[i]));
+                }
+            }
+        }
+    } else {
+        if (!langPtr) return;
+        Language* lang = *langPtr;
 
+        Array<ImportSpec> imports = lang->parseImports(content, path);
 
+        // Report progress
+        if (onProgress) {
+            std::lock_guard<std::mutex> lock(_compileMutex);
+            onProgress("Building", _compiledCount.load(), _discoveredCount.load());
+        }
 
-    Array<ImportSpec> imports = lang->parseImports(content, path);
+        for (usz i = 0; i < imports.size(); ++i) {
+            String resolved = resolveImport(imports[i], path);
+            if (!resolved.isEmpty()) resolved = canonicalize(resolved);
 
-    if (onProgress) {
-        onProgress("Discovering", _graph.nodes.size(), 0);
-    }
-
-    for (usz i = 0; i < imports.size(); ++i) {
-        String resolved = resolveImport(imports[i], path);
-        if (!resolved.isEmpty()) resolved = canonicalize(resolved);
-
-        // Try to discover the resolved file
-        // For files that might not have an extension, try common extensions
-        if (detectLanguage(resolved).isEmpty()) {
-            // Try common extensions
-            const char* tryExts[] = {
-                ".cpp", ".c", ".cc", ".cxx",
-                ".hpp", ".h", ".hxx",
-                ".js", ".ts", ".mjs",
-                ".py",
-                ".wasm",
-                nullptr
-            };
-            bool found = false;
-            for (int e = 0; tryExts[e]; ++e) {
-                String candidate = resolved;
-                candidate += tryExts[e];
-                // Check if readable
-                if (onRead) {
-                    String test = onRead(candidate);
-                    if (test.length() > 0) {
+            // Try to discover the resolved file
+            // For files that might not have an extension, try common extensions
+            if (detectLanguage(resolved).isEmpty()) {
+                // Try common extensions
+                const char* tryExts[] = {
+                    ".cpp", ".c", ".cc", ".cxx",
+                    ".hpp", ".h", ".hxx",
+                    ".js", ".ts", ".mjs",
+                    ".py",
+                    ".wasm",
+                    nullptr
+                };
+                bool found = false;
+                for (int e = 0; tryExts[e]; ++e) {
+                    String candidate = resolved;
+                    candidate += tryExts[e];
+                    // Check if readable via fast stat check instead of heavy read!
+                    if (::access(candidate.c_str(), 0) == 0) {
                         resolved = candidate;
                         found = true;
                         break;
                     }
                 }
+                if (!found) continue;
             }
-            if (!found) continue;
+
+            discoverFile(resolved);
+
+            {
+                std::lock_guard<std::mutex> lock(_compileMutex);
+                if (_graph.hasNode(resolved)) {
+                    _graph.addEdge(nodeIdx, _graph.indexOf(resolved));
+                }
+            }
+            resolvedImports.push(resolved);
         }
 
-        discoverFile(resolved);
+        // Save/Update in our database map
+        CachedFileEntry entry;
+        entry.path = path;
+        entry.language = langName;
+        entry.mtime = mtime;
+        entry.size = size;
+        entry.contentHash = contentHash;
+        entry.resolvedImports = resolvedImports;
+        _cachedFiles.set(path, entry);
+    }
 
-        if (_graph.hasNode(resolved)) {
-            _graph.addEdge(nodeIdx, _graph.indexOf(resolved));
-        }
+    if (_activeTarget) {
+        queueCompile(nodeIdx, _activeTarget, _activeTargetName);
     }
 }
 
@@ -335,7 +401,20 @@ void Engine::input(const String& name, const String& content) {
     _inputs.push(Xi::Move(inp));
 }
 
-void Engine::find() {
+void Engine::find(const String& targetName) {
+    _discoveredCount = 0;
+    _compiledCount = 0;
+    loadDepDb();
+    Target* target = nullptr;
+    if (!targetName.isEmpty()) {
+        target = targetByName(targetName);
+        if (target) {
+            _activeTarget = target;
+            _activeTargetName = targetName;
+            startCompileWorkers(target, targetName);
+        }
+    }
+
     if (onInfo) onInfo("Discovering dependencies...");
 
     for (usz i = 0; i < _inputs.size(); ++i) {
@@ -348,6 +427,7 @@ void Engine::find() {
 
             usz nodeIdx = _graph.addNode(path, langName);
             _graph.nodes[nodeIdx].content = _inputs[i].content;
+            _discoveredCount++;
 
             // If it's a C++ header file, infer and register its include root
             String ext;
@@ -477,7 +557,10 @@ void Engine::find() {
         }
     }
 
-    g_allParsedClasses = parser.classes;
+    {
+        std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
+        g_allParsedClasses = parser.classes;
+    }
 
     if (parser.classes.size() > 0 || parser.functions.size() > 0) {
         // Generate C++ bridge
@@ -584,8 +667,10 @@ void Engine::find() {
     // Compute build plan
     _plan = _graph.computeBuildPlan();
 
-
-
+    if (_activeTarget) {
+        _activeTarget = nullptr;
+        _activeTargetName.clear();
+    }
 }
 
 bool Engine::build(const String& targetName) {
@@ -609,7 +694,12 @@ bool Engine::build(const String& targetName) {
     // Assign compile forms based on target and precompute content hashes
     for (usz i = 0; i < _graph.nodes.size(); ++i) {
         _graph.nodes[i].form = target->formFor(_graph.nodes[i].language);
-        _graph.nodes[i].contentHash = Cache::hashContent(_graph.nodes[i].content);
+        if (_graph.nodes[i].contentHash.isEmpty()) {
+            if (_graph.nodes[i].content.isEmpty() && !_graph.nodes[i].path.isEmpty()) {
+                if (onRead) _graph.nodes[i].content = onRead(_graph.nodes[i].path);
+            }
+            _graph.nodes[i].contentHash = Cache::hashContent(_graph.nodes[i].content);
+        }
     }
 
     // ─── Level 2 Global Build Cache Check ─────────────────────────────────
@@ -639,12 +729,16 @@ bool Engine::build(const String& targetName) {
     globalInput += _generatedQuickjsBindings;
 
     String globalKey = Cache::computeKey(globalInput, targetName, {}, {});
+    // printf("Sew DEBUG: globalKey = %s, onCacheHas = %d\n", globalKey.c_str(), onCacheHas ? (int)onCacheHas(globalKey) : -1);
+    // fflush(stdout);
 
     if (onCacheHas && onCacheHas(globalKey)) {
-        String cachedOutContent = onCacheGet(globalKey);
-        if (cachedOutContent.length() > 0) {
+        String cachedPath = onCacheGet(globalKey);
+        if (cachedPath.length() > 0) {
             bool wasmOk = true;
-            String cachedWasmContent;
+            // printf("Sew DEBUG: cachedPath = '%s', wasmOk = %d\n", cachedPath.c_str(), wasmOk);
+            // fflush(stdout);
+            String cachedWasmPath;
             String wasmOutput;
             if (targetName == "js") {
                 wasmOutput = outputPath;
@@ -658,8 +752,8 @@ bool Engine::build(const String& targetName) {
                 wasmOutput += ".wasm";
 
                 if (onCacheHas(globalKey + "_wasm")) {
-                    cachedWasmContent = onCacheGet(globalKey + "_wasm");
-                    if (cachedWasmContent.length() == 0) {
+                    cachedWasmPath = onCacheGet(globalKey + "_wasm");
+                    if (cachedWasmPath.length() == 0) {
                         wasmOk = false;
                     }
                 } else {
@@ -668,18 +762,29 @@ bool Engine::build(const String& targetName) {
             }
 
             if (wasmOk) {
-                FILE* fOut = fopen(outputPath.c_str(), "wb");
-                if (fOut) {
-                    fwrite(cachedOutContent.data(), 1, cachedOutContent.size(), fOut);
-                    fclose(fOut);
-                }
-                if (targetName == "js" && cachedWasmContent.length() > 0) {
-                    FILE* fWasm = fopen(wasmOutput.c_str(), "wb");
-                    if (fWasm) {
-                        fwrite(cachedWasmContent.data(), 1, cachedWasmContent.size(), fWasm);
-                        fclose(fWasm);
+                if (onRead) {
+                    String bin = onRead(cachedPath);
+                    if (bin.length() > 0) {
+                        FILE* fOut = fopen(outputPath.c_str(), "wb");
+                        if (fOut) {
+                            fwrite(bin.data(), 1, bin.size(), fOut);
+                            fclose(fOut);
+                            ::chmod(outputPath.c_str(), 0755);
+                        }
+                    }
+                    if (targetName == "js" && cachedWasmPath.length() > 0) {
+                        String wasmBin = onRead(cachedWasmPath);
+                        if (wasmBin.length() > 0) {
+                            FILE* fWasm = fopen(wasmOutput.c_str(), "wb");
+                            if (fWasm) {
+                                fwrite(wasmBin.data(), 1, wasmBin.size(), fWasm);
+                                fclose(fWasm);
+                            }
+                        }
                     }
                 }
+                stopCompileWorkers();
+                saveDepDb();
                 if (onInfo) {
                     onInfo("Global build cache hit! Restored outputs instantly.");
                 }
@@ -690,10 +795,35 @@ bool Engine::build(const String& targetName) {
             }
         }
     }
+    
+    // Global cache miss: wait for parallel compile workers to finish
+    stopCompileWorkers();
+
+    std::unique_lock<std::mutex> compileLock(_compileMutex);
+    if (onProgress) {
+        onProgress("Building", _compiledCount.load(), _discoveredCount.load());
+    }
+    _asyncCompileNodeIndices.clear();
+
+    if (!_compileSuccess) {
+        if (onError) onError(_compileErrors);
+        return false;
+    }
 
     Array<CompileResult> allResults;
+    for (usz i = 0; i < _asyncCompileResults.size(); ++i) {
+        allResults.push(Xi::Move(_asyncCompileResults[i]));
+    }
+    _asyncCompileResults.clear();
+
     usz totalNodes = _graph.nodes.size();
     usz compiled = 0;
+    for (usz i = 0; i < _graph.nodes.size(); ++i) {
+        if (_graph.nodes[i].compiled) {
+            compiled++;
+        }
+    }
+    compileLock.unlock();
 
     // Execute build plan step by step
     for (usz stepIdx = 0; stepIdx < _plan.steps.size(); ++stepIdx) {
@@ -777,7 +907,7 @@ bool Engine::build(const String& targetName) {
                                     cachedHit = true;
                                     compiled++;
                                     if (onProgress) {
-                                        onProgress("Cached", compiled, totalNodes);
+                                        onProgress("Building", compiled, totalNodes);
                                     }
                                     cachedPath = onCacheGet(cacheKey);
                                     
@@ -879,7 +1009,7 @@ bool Engine::build(const String& targetName) {
                                 node.compiled = true;
                                 compiled++;
                                 if (onProgress) {
-                                    onProgress("Compiling", compiled, totalNodes);
+                                    onProgress("Building", compiled, totalNodes);
                                 }
                             }
                         }
@@ -935,18 +1065,8 @@ bool Engine::build(const String& targetName) {
 
     // Save to global build cache
     if (onCacheSet) {
-        FILE* fOut = fopen(outputPath.c_str(), "rb");
-        if (fOut) {
-            fseek(fOut, 0, SEEK_END);
-            long long outSize = ftell(fOut);
-            fseek(fOut, 0, SEEK_SET);
-            if (outSize > 0) {
-                String outContent;
-                outContent.allocate((usz)outSize);
-                fread((void*)outContent.data(), 1, (usz)outSize, fOut);
-                onCacheSet(globalKey, outContent);
-            }
-            fclose(fOut);
+        if (::access(outputPath.c_str(), 0) == 0) {
+            onCacheSet(globalKey, outputPath);
         }
 
         if (targetName == "js") {
@@ -960,26 +1080,13 @@ bool Engine::build(const String& targetName) {
             }
             wasmOutput += ".wasm";
 
-            FILE* fWasm = fopen(wasmOutput.c_str(), "rb");
-            if (fWasm) {
-                fseek(fWasm, 0, SEEK_END);
-                long long wasmSize = ftell(fWasm);
-                fseek(fWasm, 0, SEEK_SET);
-                if (wasmSize > 0) {
-                    String wasmContent;
-                    wasmContent.allocate((usz)wasmSize);
-                    fread((void*)wasmContent.data(), 1, (usz)wasmSize, fWasm);
-                    onCacheSet(globalKey + "_wasm", wasmContent);
-                }
-                fclose(fWasm);
+            if (::access(wasmOutput.c_str(), 0) == 0) {
+                onCacheSet(globalKey + "_wasm", wasmOutput);
             }
         }
     }
 
-    // Clean up temporary sew_bridge files
-    // ::unlink((tempDir + "/sew_bridge.cpp").c_str());
-    // ::unlink((tempDir + "/sew_bridge.js").c_str());
-    // ::unlink((tempDir + "/sew_obj__tmp_sew_bridge.o").c_str());
+    saveDepDb();
     return true;
 }
 
@@ -1002,6 +1109,293 @@ void Engine::destroy() {
     _inputs.clear();
     _inferredIncludeRoots.clear();
     _evalCtx.destroy();
+}
+
+void Engine::startCompileWorkers(Target* target, const String& targetName) {
+    unsigned int numCores = std::thread::hardware_concurrency();
+    if (numCores == 0) numCores = 4;
+    
+    std::lock_guard<std::mutex> lock(_compileMutex);
+    _compileDone = false;
+    _compileSuccess = true;
+    _compileErrors.clear();
+    _asyncCompileResults.clear();
+    _asyncCompileNodeIndices.clear();
+    _compileQueue.clear();
+    _compileThreads.clear();
+    
+    for (unsigned int i = 0; i < numCores; ++i) {
+        _compileThreads.push_back(std::thread([this, target, targetName]() {
+            for (;;) {
+                CompileTask task;
+                {
+                    std::unique_lock<std::mutex> lock(_compileMutex);
+                    _compileCv.wait(lock, [this]() { return _compileDone || !_compileQueue.empty(); });
+                    if (_compileQueue.empty() && _compileDone) {
+                        break;
+                    }
+                    task = Xi::Move(_compileQueue.back());
+                    _compileQueue.pop_back();
+                }
+                
+                CompileRequest& req = task.req;
+                Language* lang = nullptr;
+                
+                Language** langPtr = _langsByName.get(task.language);
+                if (langPtr) {
+                    lang = *langPtr;
+                }
+                
+                if (lang) {
+                    String cacheKey = Cache::computeKey(req.sourceContent + (req.outputPath.endsWith(".so") ? ":fPIC" : ""), targetName, {}, task.depHashes);
+                    bool cacheHit = false;
+                    CompileResult res;
+                    if (onCacheHas && onCacheHas(cacheKey)) {
+                        res.outputPath = onCacheGet(cacheKey);
+                        res.success = true;
+                        cacheHit = true;
+                    } else {
+                        res = lang->compile(req);
+                    }
+                    
+                    std::lock_guard<std::mutex> lock(_compileMutex);
+                    if (!res.success) {
+                        _compileSuccess = false;
+                        _compileErrors = "Failed to compile " + req.sourcePath + ": " + res.errors;
+                    } else {
+                        if (!cacheHit && onCacheSet && res.outputPath.length() > 0) {
+                            onCacheSet(cacheKey, res.outputPath);
+                        }
+                        _asyncCompileResults.push(Xi::Move(res));
+                        _asyncCompileNodeIndices.push(task.nodeIdx);
+                        _compiledCount++;
+                        if (onProgress) {
+                            onProgress("Building", _compiledCount.load(), _discoveredCount.load());
+                        }
+                    }
+                }
+            }
+        }));
+    }
+}
+
+void Engine::stopCompileWorkers() {
+    {
+        std::lock_guard<std::mutex> lock(_compileMutex);
+        _compileDone = true;
+        _compileCv.notify_all();
+    }
+    for (auto& t : _compileThreads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    _compileThreads.clear();
+
+    for (usz i = 0; i < _asyncCompileNodeIndices.size(); ++i) {
+        _graph.nodes[_asyncCompileNodeIndices[i]].compiled = true;
+    }
+}
+
+static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Map<usz, bool>& visited) {
+    if (visited.has(nodeIdx)) return;
+    visited.set(nodeIdx, true);
+    const auto& node = graph.nodes[nodeIdx];
+    for (usz i = 0; i < node.dependencies.size(); ++i) {
+        collectDepHashesRecursive(graph, node.dependencies[i], hashes, visited);
+    }
+    hashes.push(node.contentHash);
+}
+
+void Engine::queueCompile(usz nodeIdx, Target* target, const String& targetName) {
+    std::lock_guard<std::mutex> lock(_compileMutex);
+    
+    SourceNode& node = _graph.nodes[nodeIdx];
+    if (node.compiled) return;
+    
+    node.form = target->formFor(node.language);
+
+    String ext;
+    long long lastDot = -1;
+    for (usz k = 0; k < node.path.size(); ++k) {
+        if (node.path.data()[k] == '.') lastDot = (long long)k;
+    }
+    if (lastDot >= 0) ext = node.path.substring((usz)lastDot);
+    
+    if (ext == ".h" || ext == ".hpp" || ext == ".hxx") {
+        node.compiled = true;
+        _compiledCount++;
+        if (onProgress) {
+            onProgress("Building", _compiledCount.load(), _discoveredCount.load());
+        }
+        return;
+    }
+    if (isRepl && (node.language == "cpp" || node.language == "c")) {
+        bool isGenerated = node.path.endsWith("sew_bridge.cpp") || node.path.endsWith("sew_qjs_bindings.cpp");
+        if (!isGenerated) {
+            node.compiled = true;
+            _compiledCount++;
+            if (onProgress) {
+                onProgress("Building", _compiledCount.load(), _discoveredCount.load());
+            }
+            return;
+        }
+    }
+    
+    if (node.content.isEmpty()) {
+        if (onRead) node.content = onRead(node.path);
+    }
+    bool isPic = outputPath.endsWith(".so");
+    
+    CompileRequest req;
+    req.sourcePath = node.path;
+    req.sourceContent = node.content;
+    req.form = node.form;
+    req.targetTriple = target->triple();
+    req.assetsDir = assetsDir;
+    if (isPic) {
+        req.flags.push("-fPIC");
+    }
+    for (usz k = 0; k < includePaths.size(); ++k) {
+        req.includePaths.push(includePaths[k]);
+    }
+    for (usz k = 0; k < _inferredIncludeRoots.size(); ++k) {
+        req.includePaths.push(_inferredIncludeRoots[k]);
+    }
+    Language** cppLangPtr = _langsByName.get("cpp");
+    if (cppLangPtr) {
+        Languages::CppLanguage* cppLang = dynamic_cast<Languages::CppLanguage*>(*cppLangPtr);
+        if (cppLang) {
+            for (usz k = 0; k < cppLang->preprocessor().includePaths.size(); ++k) {
+                bool exists = false;
+                for (usz j = 0; j < req.includePaths.size(); ++j) {
+                    if (req.includePaths[j] == cppLang->preprocessor().includePaths[k]) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    req.includePaths.push(cppLang->preprocessor().includePaths[k]);
+                }
+            }
+        }
+    }
+    
+    if (node.path.indexOf("sew_qjs_bindings.cpp") != (usz)-1) {
+        char pathBuf[1024];
+        ssize_t len = ::readlink("/proc/self/exe", pathBuf, sizeof(pathBuf) - 1);
+        if (len != -1) {
+            pathBuf[len] = '\0';
+            char* lastSlash = strrchr(pathBuf, '/');
+            if (lastSlash) {
+                *lastSlash = '\0';
+                String execDir(pathBuf);
+                String qjsPath = execDir + "/_deps/quickjs_src-src";
+                struct stat st;
+                if (::stat(qjsPath.c_str(), &st) != 0) {
+                    qjsPath = execDir + "/../thirdparty/quickjs";
+                }
+                req.includePaths.push(qjsPath);
+            }
+        }
+    }
+    
+    String tempDir = getTempDir();
+    String safePath = node.path;
+    safePath = safePath.replace("/", "_");
+    safePath = safePath.replace("\\", "_");
+    safePath = safePath.replace(".", "_");
+    String outPath = tempDir + "/sew_obj_" + safePath + ".o";
+    req.outputPath = outPath;
+    
+    Array<String> depHashes;
+    Map<usz, bool> visited;
+    for (usz i = 0; i < node.dependencies.size(); ++i) {
+        collectDepHashesRecursive(_graph, node.dependencies[i], depHashes, visited);
+    }
+
+    CompileTask task;
+    task.nodeIdx = nodeIdx;
+    task.language = node.language;
+    task.req = Xi::Move(req);
+    task.depHashes = Xi::Move(depHashes);
+    _compileQueue.push_back(Xi::Move(task));
+    _compileCv.notify_one();
+}
+
+void Engine::loadDepDb() {
+    _cachedFiles.clear();
+    const char* home = ::getenv("HOME");
+    if (!home) home = "/tmp";
+    String dbPath = String(home) + "/.cache/sew/dep_db.txt";
+    
+    FILE* f = fopen(dbPath.c_str(), "r");
+    if (!f) return;
+    
+    char line[4096];
+    CachedFileEntry current;
+    bool hasCurrent = false;
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[len - 1] = '\0';
+            len--;
+        }
+        if (len == 0) continue;
+        
+        if (line[0] == 'F' && line[1] == ' ') {
+            if (hasCurrent) {
+                _cachedFiles.set(current.path, current);
+            }
+            current = CachedFileEntry();
+            char langBuf[64] = {0};
+            long long mtime = 0;
+            long long size = 0;
+            char hashBuf[128] = {0};
+            char pathBuf[2048] = {0};
+            if (sscanf(line, "F %63s %lld %lld %127s %[^\n]", langBuf, &mtime, &size, hashBuf, pathBuf) >= 5) {
+                current.language = langBuf;
+                current.mtime = mtime;
+                current.size = size;
+                current.contentHash = hashBuf;
+                current.path = pathBuf;
+                hasCurrent = true;
+            } else {
+                hasCurrent = false;
+            }
+        } else if (line[0] == 'I' && line[1] == ' ' && hasCurrent) {
+            current.resolvedImports.push(line + 2);
+        }
+    }
+    if (hasCurrent) {
+        _cachedFiles.set(current.path, current);
+    }
+    fclose(f);
+}
+
+void Engine::saveDepDb() {
+    const char* home = ::getenv("HOME");
+    if (!home) home = "/tmp";
+    String dbDir = String(home) + "/.cache/sew";
+    ::mkdir(dbDir.c_str(), 0755);
+    String dbPath = dbDir + "/dep_db.txt";
+    
+    FILE* f = fopen(dbPath.c_str(), "w");
+    if (!f) return;
+    
+    for (auto& kv : _cachedFiles) {
+        CachedFileEntry& entry = kv.value;
+        fprintf(f, "F %s %lld %lld %s %s\n",
+                entry.language.c_str(),
+                entry.mtime,
+                entry.size,
+                entry.contentHash.c_str(),
+                entry.path.c_str());
+        for (usz j = 0; j < entry.resolvedImports.size(); ++j) {
+            fprintf(f, "I %s\n", entry.resolvedImports[j].c_str());
+        }
+    }
+    fclose(f);
 }
 
 } // namespace Sew

@@ -18,9 +18,15 @@ using namespace Collection;
 
 class Cache {
 public:
-    /// Compute a cache key from content + target + flags + dependency hashes.
     static String computeKey(
         const String& sourceContent,
+        const String& targetName,
+        const Array<String>& flags,
+        const Array<String>& depHashes);
+
+    /// Compute a cache key from pre-computed content hash + target + flags + dependency hashes.
+    static String computeKeyFromHash(
+        const String& contentHash,
         const String& targetName,
         const Array<String>& flags,
         const Array<String>& depHashes);

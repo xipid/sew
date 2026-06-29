@@ -987,5 +987,6 @@ void CppHeaderParser::parse(const String& content) {
 }
 
 Array<ParsedClass> g_allParsedClasses;
+std::mutex g_parsedClassesMutex;
 
 } // namespace Sew

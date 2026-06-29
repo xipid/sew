@@ -844,26 +844,28 @@ int main(int argc, char** argv) {
         // Build progress bar
         Progress progress;
         usz progressTask = 0;
+        std::mutex progressMutex;
         if (showProgress) {
-            progressTask = progress.addLinearTask(1, "it", "Build");
-            sew.onProgress = [&progress, progressTask](String msg, usz current, usz total) {
+            progressTask = progress.addLinearTask(1, "it", "Building");
+            static i64 lastUpdateTime = 0;
+            sew.onProgress = [&progress, progressTask, &progressMutex](String msg, usz current, usz total) {
+                std::lock_guard<std::mutex> lock(progressMutex);
                 if (progress.tasks.size() == 0) return;
-                progress.message = msg;
-                if (msg == "Discovering") {
-                    progress.tasks[progressTask].totalRaw = (u64)current;
-                    progress.tasks[progressTask].total = String((long long)current);
-                    progress.updateLinearTask(progressTask, current, msg);
-                } else {
-                    progress.tasks[progressTask].totalRaw = (u64)total;
-                    progress.tasks[progressTask].total = String((long long)total);
-                    progress.updateLinearTask(progressTask, current, msg);
+                progress.message = "";
+                progress.tasks[progressTask].totalRaw = (u64)total;
+                progress.tasks[progressTask].total = String((long long)total);
+                progress.updateLinearTask(progressTask, current, "Building");
+                
+                i64 now = millis();
+                if (current == total || now - lastUpdateTime >= 33) {
+                    progress.update();
+                    lastUpdateTime = now;
                 }
-                progress.update();
             };
         }
 
         // Discover dependencies
-        sew.find();
+        sew.find(target);
 
         // Build C++ / JS files
         bool ok = sew.build(target);
