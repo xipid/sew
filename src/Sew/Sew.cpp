@@ -641,7 +641,8 @@ void Engine::find(const String& targetName) {
     }
 
     String tempDir = getTempDir();
-    CppHeaderParser parser;
+    CppHeaderParser headerParser;     // For generating the C++ bridge/JS bindings
+    CppHeaderParser cppParser;
     Array<String> headerPaths;        // headers to #include in the bridge
     Array<String> headerPathsForParse; // all headers to parse for bindings
     _inferredIncludeRoots.clear();
@@ -655,7 +656,7 @@ void Engine::find(const String& targetName) {
             if (node.path.data()[k] == '.') lastDot = (long long)k;
         }
         if (lastDot >= 0) ext = node.path.substring((usz)lastDot);
-        if ((node.language == "cpp" || node.language == "c") && (ext == ".h" || ext == ".hpp" || ext == ".hxx")) {
+        if ((node.language == "cpp" || node.language == "c")) {
             if (seenHeaders.has(node.path)) continue; // skip duplicates
             seenHeaders.set(node.path, true);
             Languages::PreprocessorResult ppResult;
@@ -673,8 +674,6 @@ void Engine::find(const String& targetName) {
             }
 
             if (node.path.includes("/sew/include/") || node.path.includes("include/Languages/") || node.path.includes("include/Sew/") ||
-                node.path.includes("/xic/include/") ||
-                node.path.includes("/xic/packages/") ||
                 node.path.includes("/deps/") || node.path.includes("/thirdparty/") ||
                 node.path.includes("/diligent/") || node.path.includes("/glfw/")) {
                 continue;
@@ -682,15 +681,26 @@ void Engine::find(const String& targetName) {
             if (node.content.isEmpty() && !node.path.isEmpty()) {
                 if (onRead) node.content = onRead(node.path);
             }
+
             ppResult = preprocessor.process(node.content, node.path);
-            parser.parse(ppResult.strippedSource);
-            headerPathsForParse.push(headerPath);
+            
+            // Always parse into cppParser (so .cpp files get reflection traits)
+            cppParser.parse(ppResult.strippedSource);
+            
+            bool isHeader = (ext == ".h" || ext == ".hpp" || ext == ".hxx");
+            if (isHeader) {
+                // Only parse into headerParser for sew_bridge.cpp bindings
+                headerParser.parse(ppResult.strippedSource);
+                headerPathsForParse.push(headerPath);
+            }
+            
             String includeRoot = inferIncludeRoot(headerPath);
             if (!includeRoot.isEmpty() && !containsPath(_inferredIncludeRoots, includeRoot)) {
                 _inferredIncludeRoots.push(includeRoot);
             }
-            // Only add to bridge #includes if this was an explicit user input
-            if (explicitInputPaths.has(headerPath)) {
+            
+            // Only add to bridge #includes if this is a HEADER file AND was an explicit user input!
+            if (isHeader && explicitInputPaths.has(headerPath)) {
                 headerPaths.push(headerPath);
             }
         }
@@ -700,21 +710,45 @@ void Engine::find(const String& targetName) {
         std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
         Array<ParsedClass> uniqueClasses;
         Map<String, bool> seenClassNames;
-        for (usz i = 0; i < parser.classes.size(); ++i) {
-            const String& className = parser.classes[i].name;
+        for (usz i = 0; i < cppParser.classes.size(); ++i) { // Changed parser to cppParser
+            const String& className = cppParser.classes[i].name;
             if (className.isEmpty() || className.length() == 0) continue;
             
             if (!seenClassNames.has(className)) {
                 seenClassNames.set(className, true);
-                uniqueClasses.push(parser.classes[i]);
+                uniqueClasses.push(cppParser.classes[i]);
             }
         }
         g_allParsedClasses = uniqueClasses;
     }
 
-    if (parser.classes.size() > 0 || parser.functions.size() > 0) {
+    Array<ParsedClass> filteredHeaderClasses;
+    for (usz i = 0; i < headerParser.classes.size(); ++i) {
+        const auto& cls = headerParser.classes[i];
+        
+        // Skip explicitly known abstract/private utility classes
+        if (cls.name == "Graphics::Renderable3" || cls.name == "Renderable3" ||
+            cls.name == "Xi::Log" || cls.name == "Log" ||
+            cls.name == "Xi::IMemoryDevice" || cls.name == "IMemoryDevice") {
+            continue;
+        }
+        
+        // Skip any class containing pure virtual methods
+        bool isAbstract = false;
+        for (usz m = 0; m < cls.methods.size(); ++m) {
+            if (cls.methods[m].isPureVirtual) {
+                isAbstract = true;
+                break;
+            }
+        }
+        if (isAbstract) continue;
+        
+        filteredHeaderClasses.push(cls);
+    }
+
+    if (headerParser.classes.size() > 0 || headerParser.functions.size() > 0) {
     // Generate C++ bridge
-        String bridgeCode = BindingGenerator::generateCppBridge(parser.classes, parser.functions, parser.namespaces, headerPathsForParse);
+        String bridgeCode = BindingGenerator::generateCppBridge(headerParser.classes, headerParser.functions, headerParser.namespaces, headerPathsForParse);
 
         // Add to graph
         String bridgePath = tempDir + "/sew_bridge.cpp";
@@ -757,13 +791,13 @@ void Engine::find(const String& targetName) {
 
         if (hasJs || isRepl) {
             // Generate TS glue and store it
-            _generatedTsGlue = BindingGenerator::generateTsGlue(parser.classes, parser.functions, wasmName);
+            _generatedTsGlue = BindingGenerator::generateTsGlue(headerParser.classes, headerParser.functions, wasmName); // Changed parser to headerParser
 
             // Generate JS glue and store it
-            _generatedJsGlue = BindingGenerator::generateJsGlue(parser.classes, parser.functions);
+            _generatedJsGlue = BindingGenerator::generateJsGlue(headerParser.classes, headerParser.functions); // Changed parser to headerParser
 
             // Generate QuickJS bindings and store it
-            _generatedQuickjsBindings = BindingGenerator::generateQuickjsBindings(parser.classes, parser.functions);
+            _generatedQuickjsBindings = BindingGenerator::generateQuickjsBindings(headerParser.classes, headerParser.functions);
 
             // Add sew_bridge.js to graph
             String jsGluePath = tempDir + "/sew_bridge.js";

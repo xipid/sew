@@ -636,72 +636,211 @@ void CppHeaderParser::parse(const String& content) {
                                 currentClass->methods.push(m);
                             } else {
                                 // Field
-                                ParsedField f;
-                                f.docComment = cleanDocComment(lastDocComment);
-                                lastDocComment.clear();
-
-                                long long eqIdx = -1;
+                                Array<usz> commaIndices;
+                                int angleLevel = 0;
+                                int parenLevel = 0;
+                                int bracketLevel = 0;
                                 for (usz k = 0; k < declTokens.size(); ++k) {
-                                    if (declTokens[k].text == "=") {
-                                        eqIdx = (long long)k;
-                                        break;
+                                    if (declTokens[k].text == "<") angleLevel++;
+                                    else if (declTokens[k].text == ">") angleLevel--;
+                                    else if (declTokens[k].text == "(") parenLevel++;
+                                    else if (declTokens[k].text == ")") parenLevel--;
+                                    else if (declTokens[k].text == "[") bracketLevel++;
+                                    else if (declTokens[k].text == "]") bracketLevel--;
+                                    
+                                    if (declTokens[k].text == "," && angleLevel == 0 && parenLevel == 0 && bracketLevel == 0) {
+                                        commaIndices.push(k);
                                     }
                                 }
 
-                                usz limit = declTokens.size();
-                                if (eqIdx >= 0) {
-                                    limit = (usz)eqIdx;
-                                }
+                                if (commaIndices.size() == 0) {
+                                    // ─── Case A: Standard Single Field Declaration ───
+                                    ParsedField f;
+                                    f.docComment = cleanDocComment(lastDocComment);
+                                    lastDocComment.clear();
 
-                                if (limit > 0) {
-                                     long long openBracketIdx = -1;
-                                     if (declTokens[limit - 1].text == "]") {
-                                         for (long long j = (long long)limit - 1; j >= 0; --j) {
-                                             if (declTokens[(usz)j].text == "[") {
-                                                 openBracketIdx = j;
-                                                 break;
-                                             }
-                                         }
-                                     }
+                                    long long eqIdx = -1;
+                                    for (usz k = 0; k < declTokens.size(); ++k) {
+                                        if (declTokens[k].text == "=") {
+                                            eqIdx = (long long)k;
+                                            break;
+                                        }
+                                    }
 
-                                     if (openBracketIdx > 0) {
-                                         f.name = declTokens[(usz)openBracketIdx - 1].text;
-                                         for (usz k = 0; k + 1 < (usz)openBracketIdx; ++k) {
-                                             if (declTokens[k].text == "static") {
-                                                 f.isStatic = true;
-                                                 continue;
+                                    usz limit = declTokens.size();
+                                    if (eqIdx >= 0) {
+                                        limit = (usz)eqIdx;
+                                    }
+
+                                    if (limit > 0) {
+                                         long long openBracketIdx = -1;
+                                         if (declTokens[limit - 1].text == "]") {
+                                             for (long long j = (long long)limit - 1; j >= 0; --j) {
+                                                 if (declTokens[(usz)j].text == "[") {
+                                                     openBracketIdx = j;
+                                                     break;
+                                                 }
                                              }
-                                             if (declTokens[k].text == "const" || declTokens[k].text == "constexpr") {
-                                                 f.isConst = true;
-                                             }
-                                             if (isDeclSpec(declTokens[k].text) && !(k + 1 < (usz)openBracketIdx && declTokens[k + 1].text == "::")) continue;
-                                             if (f.type.length() > 0 && !f.type.endsWith("*") && !f.type.endsWith("&") && declTokens[k].text != "*" && declTokens[k].text != "&") {
-                                                 f.type += " ";
-                                             }
-                                             f.type += declTokens[k].text;
                                          }
-                                         for (usz k = (usz)openBracketIdx; k < limit; ++k) {
-                                             f.type += declTokens[k].text;
+
+                                         if (openBracketIdx > 0) {
+                                             f.name = declTokens[(usz)openBracketIdx - 1].text;
+                                             for (usz k = 0; k + 1 < (usz)openBracketIdx; ++k) {
+                                                 if (declTokens[k].text == "static") {
+                                                     f.isStatic = true;
+                                                     continue;
+                                                 }
+                                                 if (declTokens[k].text == "const" || declTokens[k].text == "constexpr") {
+                                                     f.isConst = true;
+                                                 }
+                                                 if (isDeclSpec(declTokens[k].text) && !(k + 1 < (usz)openBracketIdx && declTokens[k + 1].text == "::")) continue;
+                                                 if (f.type.length() > 0 && !f.type.endsWith("*") && !f.type.endsWith("&") && declTokens[k].text != "*" && declTokens[k].text != "&") {
+                                                     f.type += " ";
+                                                 }
+                                                 f.type += declTokens[k].text;
+                                             }
+                                             for (usz k = (usz)openBracketIdx; k < limit; ++k) {
+                                                 f.type += declTokens[k].text;
+                                             }
+                                         } else {
+                                             f.name = declTokens[limit - 1].text;
+                                             for (usz k = 0; k + 1 < limit; ++k) {
+                                                 if (declTokens[k].text == "static") {
+                                                     f.isStatic = true;
+                                                     continue;
+                                                 }
+                                                 if (declTokens[k].text == "const" || declTokens[k].text == "constexpr") {
+                                                     f.isConst = true;
+                                                 }
+                                                 if (isDeclSpec(declTokens[k].text) && !(k + 1 < limit && declTokens[k + 1].text == "::")) continue;
+                                                 if (f.type.length() > 0 && !f.type.endsWith("*") && !f.type.endsWith("&") && declTokens[k].text != "*" && declTokens[k].text != "&") {
+                                                     f.type += " ";
+                                                 }
+                                                 f.type += declTokens[k].text;
+                                             }
                                          }
-                                     } else {
-                                         f.name = declTokens[limit - 1].text;
-                                         for (usz k = 0; k + 1 < limit; ++k) {
-                                             if (declTokens[k].text == "static") {
-                                                 f.isStatic = true;
-                                                 continue;
+                                    }
+                                    currentClass->fields.push(f);
+                                } else {
+                                    // ─── Case B: Multi-Variable Single-Line Declaration ───
+                                    Array<Array<Token>> groups;
+                                    usz lastStart = 0;
+                                    for (usz k = 0; k < commaIndices.size(); ++k) {
+                                        Array<Token> group;
+                                        for (usz j = lastStart; j < commaIndices[k]; ++j) {
+                                            group.push(declTokens[j]);
+                                        }
+                                        groups.push(group);
+                                        lastStart = commaIndices[k] + 1;
+                                    }
+                                    Array<Token> lastGroup;
+                                    for (usz j = lastStart; j < declTokens.size(); ++j) {
+                                        lastGroup.push(declTokens[j]);
+                                    }
+                                    groups.push(lastGroup);
+
+                                    // 1. Parse Group 0 (establishes the base type)
+                                    ParsedField f0;
+                                    f0.docComment = cleanDocComment(lastDocComment);
+                                    lastDocComment.clear();
+
+                                    Array<Token>& g0 = groups[0];
+                                    long long eqIdx0 = -1;
+                                    for (usz k = 0; k < g0.size(); ++k) {
+                                        if (g0[k].text == "=") {
+                                            eqIdx0 = (long long)k;
+                                            break;
+                                        }
+                                    }
+                                    usz limit0 = g0.size();
+                                    if (eqIdx0 >= 0) limit0 = (usz)eqIdx0;
+
+                                    if (limit0 > 0) {
+                                         long long openBracketIdx = -1;
+                                         if (g0[limit0 - 1].text == "]") {
+                                             for (long long j = (long long)limit0 - 1; j >= 0; --j) {
+                                                 if (g0[(usz)j].text == "[") {
+                                                     openBracketIdx = j;
+                                                     break;
+                                                 }
                                              }
-                                             if (declTokens[k].text == "const" || declTokens[k].text == "constexpr") {
-                                                 f.isConst = true;
-                                             }
-                                             if (isDeclSpec(declTokens[k].text) && !(k + 1 < limit && declTokens[k + 1].text == "::")) continue;
-                                             if (f.type.length() > 0 && !f.type.endsWith("*") && !f.type.endsWith("&") && declTokens[k].text != "*" && declTokens[k].text != "&") {
-                                                 f.type += " ";
-                                             }
-                                             f.type += declTokens[k].text;
                                          }
-                                     }
+                                         if (openBracketIdx > 0) {
+                                             f0.name = g0[(usz)openBracketIdx - 1].text;
+                                             for (usz k = 0; k + 1 < (usz)openBracketIdx; ++k) {
+                                                 if (g0[k].text == "static") { f0.isStatic = true; continue; }
+                                                 if (g0[k].text == "const" || g0[k].text == "constexpr") f0.isConst = true;
+                                                 if (isDeclSpec(g0[k].text) && !(k + 1 < (usz)openBracketIdx && g0[k + 1].text == "::")) continue;
+                                                 if (f0.type.length() > 0 && !f0.type.endsWith("*") && !f0.type.endsWith("&") && g0[k].text != "*" && g0[k].text != "&") {
+                                                     f0.type += " ";
+                                                 }
+                                                 f0.type += g0[k].text;
+                                             }
+                                             for (usz k = (usz)openBracketIdx; k < limit0; ++k) f0.type += g0[k].text;
+                                         } else {
+                                             f0.name = g0[limit0 - 1].text;
+                                             for (usz k = 0; k + 1 < limit0; ++k) {
+                                                 if (g0[k].text == "static") { f0.isStatic = true; continue; }
+                                                 if (g0[k].text == "const" || g0[k].text == "constexpr") f0.isConst = true;
+                                                 if (isDeclSpec(g0[k].text) && !(k + 1 < limit0 && g0[k + 1].text == "::")) continue;
+                                                 if (f0.type.length() > 0 && !f0.type.endsWith("*") && !f0.type.endsWith("&") && g0[k].text != "*" && g0[k].text != "&") {
+                                                     f0.type += " ";
+                                                 }
+                                                 f0.type += g0[k].text;
+                                             }
+                                         }
+                                    }
+
+                                    String baseType = f0.type;
+                                    bool baseStatic = f0.isStatic;
+                                    bool baseConst = f0.isConst;
+                                    currentClass->fields.push(f0);
+
+                                    // 2. Parse Group 1+ (re-uses base type with local adjustments)
+                                    for (usz gIdx = 1; gIdx < groups.size(); ++gIdx) {
+                                        Array<Token>& g = groups[gIdx];
+                                        ParsedField fg;
+                                        fg.type = baseType;
+                                        fg.isStatic = baseStatic;
+                                        fg.isConst = baseConst;
+
+                                        long long eqIdxG = -1;
+                                        for (usz k = 0; k < g.size(); ++k) {
+                                            if (g[k].text == "=") {
+                                                eqIdxG = (long long)k;
+                                                break;
+                                            }
+                                        }
+                                        usz limitG = g.size();
+                                        if (eqIdxG >= 0) limitG = (usz)eqIdxG;
+
+                                        if (limitG > 0) {
+                                             long long openBracketIdx = -1;
+                                             if (g[limitG - 1].text == "]") {
+                                                 for (long long j = (long long)limitG - 1; j >= 0; --j) {
+                                                     if (g[(usz)j].text == "[") {
+                                                         openBracketIdx = j;
+                                                         break;
+                                                     }
+                                                 }
+                                             }
+                                             if (openBracketIdx > 0) {
+                                                 fg.name = g[(usz)openBracketIdx - 1].text;
+                                                 for (usz k = (usz)openBracketIdx; k < limitG; ++k) {
+                                                     fg.type += g[k].text;
+                                                 }
+                                             } else {
+                                                 usz startToken = 0;
+                                                 while (startToken + 1 < limitG && (g[startToken].text == "*" || g[startToken].text == "&")) {
+                                                     fg.type += g[startToken].text;
+                                                     startToken++;
+                                                 }
+                                                 fg.name = g[limitG - 1].text;
+                                             }
+                                        }
+                                        currentClass->fields.push(fg);
+                                    }
                                 }
-                                currentClass->fields.push(f);
                             }
                         }
                     } else {

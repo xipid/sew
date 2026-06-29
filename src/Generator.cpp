@@ -516,9 +516,33 @@ String BindingGenerator::generateCppBridge(const Array<ParsedClass>& classes,
     }
     out += "#include <cstdlib>\n";
     out += "#include <cstdint>\n";
-    out += "#include <stdint.h>\n\n";
+    out += "#include <stdint.h>\n";
+    out += "#include <type_traits>\n\n";
     out += "using namespace Collection;\n";
     out += "using namespace Xi;\n";
+
+     out += "template<typename T>\n";
+    out += "typename std::enable_if<std::is_default_constructible<T>::value && !std::is_abstract<T>::value, T*>::type\n";
+    out += "sew_new_default_helper() {\n";
+    out += "    return new T();\n";
+    out += "}\n\n";
+    out += "template<typename T>\n";
+    out += "typename std::enable_if<!std::is_default_constructible<T>::value || std::is_abstract<T>::value, T*>::type\n";
+    out += "sew_new_default_helper() {\n";
+    out += "    return nullptr;\n";
+    out += "}\n\n";
+    
+    out += "template<typename T, typename... Args>\n";
+    out += "typename std::enable_if<std::is_constructible<T, Args...>::value && !std::is_abstract<T>::value, T*>::type\n";
+    out += "sew_new_args_helper(const Args&... args) {\n";
+    out += "    return new T(args...);\n";
+    out += "}\n\n";
+    out += "template<typename T, typename... Args>\n";
+    out += "typename std::enable_if<!std::is_constructible<T, Args...>::value || std::is_abstract<T>::value, T*>::type\n";
+    out += "sew_new_args_helper(const Args&...) {\n";
+    out += "    return nullptr;\n";
+    out += "}\n\n";
+
     for (usz i = 0; i < namespaces.size(); ++i) {
         if (namespaces[i] != "Collection" && namespaces[i] != "Xi") {
             out += "using namespace " + namespaces[i] + ";\n";
@@ -714,7 +738,7 @@ String BindingGenerator::generateCppBridge(const Array<ParsedClass>& classes,
             if (!hasConstructor) {
                 out += "__attribute__((visibility(\"default\"))) __attribute__((used)) ";
                 out += cls.name + "* export_" + bridgeClsName + "_new_default() {\n";
-                out += "    return new " + cls.name + "();\n";
+                out += "    return sew_new_default_helper<" + cls.name + ">();\n";
                 out += "}\n\n";
             }
             for (usz j = 0; j < cls.methods.size(); ++j) {
@@ -733,7 +757,11 @@ String BindingGenerator::generateCppBridge(const Array<ParsedClass>& classes,
                             out += "    String sew_local_" + m.params[k].name + "(" + m.params[k].name + ");\n";
                         }
                     }
-                    out += "    return new " + cls.name + "(";
+                    out += "    return sew_new_args_helper<" + cls.name;
+                    for (usz k = 0; k < m.params.size(); ++k) {
+                        out += ", " + m.params[k].type;
+                    }
+                    out += ">(";
                     for (usz k = 0; k < m.params.size(); ++k) {
                         if (k > 0) out += ", ";
                         out += getPassValue(m.params[k], classes);

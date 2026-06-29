@@ -350,6 +350,22 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
     usz i = 0;
     while (i < source.length()) {
         char c = source[i];
+        
+        // Skip C++11 raw string literals R"(...)" to keep braceDepth synchronized
+        if (!inComment && !inLineComment && !inString) {
+            if (c == 'R' && i + 2 < source.length() && source[i + 1] == '"' && source[i + 2] == '(') {
+                i += 3;
+                while (i < source.length()) {
+                    if (source[i] == ')' && i + 1 < source.length() && source[i + 1] == '"') {
+                        i += 2;
+                        break;
+                    }
+                    i++;
+                }
+                continue;
+            }
+        }
+
         if (inComment) {
             if (c == '*' && i + 1 < source.length() && source[i + 1] == '/') {
                 inComment = false;
@@ -409,15 +425,16 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
         if (braceDepth == 0) {
             for (usz ci = 0; ci < classes.size(); ++ci) {
                 const String& className = classes[ci].name;
-                if (className.isEmpty() || className.length() == 0) continue; // <-- ADD THIS LINE
+                if (className.isEmpty() || className.length() == 0) continue;
                 if (className.indexOf('<') >= 0) continue;
                 
                 if (matchesAtIndex(source, i, className)) {
                     bool boundaryBefore = (i == 0 || !isAlnum(source[i - 1]) && source[i - 1] != '_');
-                    usz nextPos = i + className.length();
-                    bool boundaryAfter = (nextPos >= source.length() || !isAlnum(source[nextPos]) && source[nextPos] != '_');
+                    usz origEnd = i + className.length();
+                    bool boundaryAfter = (origEnd >= source.length() || !isAlnum(source[origEnd]) && source[origEnd] != '_');
                     
                     if (boundaryBefore && boundaryAfter) {
+                        usz nextPos = origEnd;
                         while (nextPos < source.length() && isSpace(source[nextPos])) {
                             nextPos++;
                         }
@@ -426,6 +443,7 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
                             nextPos++;
                         }
                         String varName = source.substring(idStart, nextPos);
+                        bool isGlobal = false;
                         if (varName.length() > 0 && varName != "class" && varName != "struct" && varName != "enum" && varName != "union" && varName != "const") {
                             usz checkPos = nextPos;
                             while (checkPos < source.length() && isSpace(source[checkPos])) {
@@ -433,10 +451,15 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
                             }
                             if (checkPos < source.length() && (source[checkPos] == ';' || source[checkPos] == '=' || source[checkPos] == '{' || source[checkPos] == '(')) {
                                 usz endPos = checkPos;
+                                bool isFunctionOrBody = false;
                                 while (endPos < source.length() && source[endPos] != ';') {
+                                    if (source[endPos] == '{') {
+                                        isFunctionOrBody = true;
+                                        break;
+                                    }
                                     endPos++;
                                 }
-                                if (endPos < source.length()) {
+                                if (endPos < source.length() && !isFunctionOrBody) {
                                     DetectedVar dv;
                                     dv.type = className;
                                     dv.name = varName;
@@ -444,10 +467,14 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
                                     dv.declEnd = nextPos;
                                     dv.insertPos = endPos + 1;
                                     result.push(dv);
+                                    isGlobal = true;
+                                    i = endPos; // Skip the entire safe declaration
                                 }
                             }
                         }
-                        i = nextPos;
+                        if (!isGlobal) {
+                            i = origEnd - 1; // Only skip the className safely
+                        }
                         continue;
                     }
                 }
@@ -484,6 +511,24 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
     while (i < source.length()) {
         char c = source[i];
         
+        // Skip C++11 raw string literals R"(...)" and copy them verbatim
+        if (!inComment && !inLineComment && !inString) {
+            if (c == 'R' && i + 2 < source.length() && source[i + 1] == '"' && source[i + 2] == '(') {
+                rewritten += "R\"(";
+                i += 3;
+                while (i < source.length()) {
+                    rewritten.push(source[i]);
+                    if (source[i] == ')' && i + 1 < source.length() && source[i + 1] == '"') {
+                        rewritten.push('"');
+                        i += 2;
+                        break;
+                    }
+                    i++;
+                }
+                continue;
+            }
+        }
+
         if (inComment) {
             rewritten.push(c);
             if (c == '*' && i + 1 < source.length() && source[i + 1] == '/') {
