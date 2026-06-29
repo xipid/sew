@@ -365,7 +365,7 @@ void Engine::discoverFile(const String& rawPath) {
     String path = canonicalize(rawPath);
     if (_graph.hasNode(path)) return;
 
-     if (path.includes("/sew/src/") || path.includes("/sew/tests/")) {
+     if (path.includes("/sew/src/")) {
         return;
     }
 
