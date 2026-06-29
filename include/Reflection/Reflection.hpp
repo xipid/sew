@@ -2,6 +2,10 @@
 #include <Reflection/Registry.hpp>
 #include <Collection/Array.hpp>
 
+#ifndef refTypeName
+#define refTypeName(T) Collection::String(#T)
+#endif
+
 namespace Sew { namespace Reflect {
 
 class __attribute__((visibility("default"))) Reflection {
@@ -34,10 +38,12 @@ public:
     // In the spec: reflect(rf.ptr()) or storing the address before field access.
     void* ptr() const;
 
+    String type() const;
     String type(const String& name) const;
     void* ptr(const String& name) const;
     Reflection reflect(const String& name) const;
-    Array<String> list() const;
+    Map<String, String> list() const; 
+    Map<String, Array<String>> listMethods() const; 
     void reset(const String& name);
     void set(const String& name, const void* bytes, usz length);
 

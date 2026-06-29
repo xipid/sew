@@ -365,6 +365,10 @@ void Engine::discoverFile(const String& rawPath) {
     String path = canonicalize(rawPath);
     if (_graph.hasNode(path)) return;
 
+     if (path.includes("/sew/src/") || path.includes("/sew/tests/")) {
+        return;
+    }
+
     String langName = detectLanguage(path);
     if (langName.isEmpty()) {
         if (onWarn) onWarn("Unknown file type: " + path);

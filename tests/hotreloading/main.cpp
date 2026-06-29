@@ -154,7 +154,7 @@ int main() {
     }
 
     // list() enumerates fields
-    Array<String> fields = rf.list();
+    Array<String> fields = rf.list().keys();
     check("V1: list() returns 2 fields", fields.size() == 2);
 
     // type() per field
@@ -189,7 +189,7 @@ int main() {
     check("V2: V2 instance is at a different address than V1", v2PlayerAddr != v1PlayerAddr);
 
     // V2 has three fields: score, shield, health
-    Array<String> fields2 = rf.list();
+    Array<String> fields2 = rf.list().keys();
     check("V2: list() returns 3 fields", fields2.size() == 3);
 
     check("V2: type(\"score\")  == \"int\"", rf.type("score")  == "int");

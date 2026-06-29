@@ -25,6 +25,43 @@ static bool isDeclSpec(const String& s) {
     return true;
 }
 
+static inline bool isAlnum(char c) {
+    return (c >= 'a' && c <= 'z') || 
+           (c >= 'A' && c <= 'Z') || 
+           (c >= '0' && c <= '9');
+}
+
+static String stripTypeSpaces(const String& s) {
+    String trimmed = s.trim();
+    String res;
+    char last_c = 0; // <-- Track the last pushed character locally (safe from null-terminators!)
+    
+    auto is_alnum = [](char c) -> bool {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    };
+    
+    for (usz i = 0; i < trimmed.length(); ++i) {
+        char c = (char)trimmed.data()[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if (last_c != 0 && is_alnum(last_c)) { // <-- Uses last_c
+                usz j = i + 1;
+                while (j < trimmed.length() && (trimmed.data()[j] == ' ' || trimmed.data()[j] == '\t' || trimmed.data()[j] == '\r' || trimmed.data()[j] == '\n')) {
+                    j++;
+                }
+                if (j < trimmed.length() && is_alnum(trimmed.data()[j])) {
+                    res.push(' ');
+                    last_c = ' '; // Update last_c to space
+                }
+                i = j - 1;
+            }
+        } else {
+            res.push(c);
+            last_c = c; // <-- Updates last_c
+        }
+    }
+    return res;
+}
+
 static Array<Token> tokenize(const String& content) {
     Array<Token> tokens;
     const u8* p = content.data();
@@ -432,6 +469,9 @@ void CppHeaderParser::parse(const String& content) {
 
                             int angleLevel = 0;
                             for (usz k = 0; k < declTokens.size(); ++k) {
+                                if (declTokens[k].text == "=") {
+                                    break; // <-- ADD THIS to stop if we hit a default initializer
+                                }
                                 if (declTokens[k].text == "<") {
                                     angleLevel++;
                                 } else if (declTokens[k].text == ">") {
@@ -540,6 +580,7 @@ void CppHeaderParser::parse(const String& content) {
                                     int angleLevel = 0;
                                     int parenLevel = 0;
                                     int bracketLevel = 0;
+                                    int braceLevel = 0;
                                     for (usz k = (usz)parenIdx + 1; k < (usz)closeParenIdx; ++k) {
                                         const Token& tok = declTokens[k];
                                         if (tok.text == "<") angleLevel++;
@@ -548,8 +589,10 @@ void CppHeaderParser::parse(const String& content) {
                                         else if (tok.text == ")") parenLevel--;
                                         else if (tok.text == "[") bracketLevel++;
                                         else if (tok.text == "]") bracketLevel--;
+                                        else if (tok.text == "{") braceLevel++;
+                                        else if (tok.text == "}") braceLevel--;
 
-                                        if (tok.text == "," && angleLevel == 0 && parenLevel == 0 && bracketLevel == 0) {
+                                        if (tok.text == "," && angleLevel == 0 && parenLevel == 0 && bracketLevel == 0 && braceLevel == 0) {
                                             if (currentParam.size() > 0) {
                                                  paramGroups.push(currentParam);
                                                  currentParam.clear();
@@ -633,6 +676,7 @@ void CppHeaderParser::parse(const String& content) {
                                     }
                                 }
 
+                                m.returnType = stripTypeSpaces(m.returnType);
                                 currentClass->methods.push(m);
                             } else {
                                 // Field
@@ -720,7 +764,10 @@ void CppHeaderParser::parse(const String& content) {
                                              }
                                          }
                                     }
-                                    currentClass->fields.push(f);
+                                    if (f.name != "operator") {
+                                        f.type = stripTypeSpaces(f.type); 
+                                        currentClass->fields.push(f);
+                                    }
                                 } else {
                                     // ─── Case B: Multi-Variable Single-Line Declaration ───
                                     Array<Array<Token>> groups;
@@ -791,10 +838,13 @@ void CppHeaderParser::parse(const String& content) {
                                          }
                                     }
 
+                                    f0.type = stripTypeSpaces(f0.type);
                                     String baseType = f0.type;
                                     bool baseStatic = f0.isStatic;
                                     bool baseConst = f0.isConst;
-                                    currentClass->fields.push(f0);
+                                    if (f0.name != "operator") {
+                                        currentClass->fields.push(f0);
+                                    }
 
                                     // 2. Parse Group 1+ (re-uses base type with local adjustments)
                                     for (usz gIdx = 1; gIdx < groups.size(); ++gIdx) {
@@ -838,6 +888,7 @@ void CppHeaderParser::parse(const String& content) {
                                                  fg.name = g[limitG - 1].text;
                                              }
                                         }
+                                        fg.type = stripTypeSpaces(fg.type);
                                         currentClass->fields.push(fg);
                                     }
                                 }
@@ -1018,6 +1069,7 @@ void CppHeaderParser::parse(const String& content) {
                         int angleLevel = 0;
                         int parenLevel = 0;
                         int bracketLevel = 0;
+                        int braceLevel = 0;
                         for (usz k = (usz)parenIdx + 1; k < (usz)closeParenIdx; ++k) {
                             const Token& tok = declTokens[k];
                             if (tok.text == "<") angleLevel++;
@@ -1026,8 +1078,10 @@ void CppHeaderParser::parse(const String& content) {
                             else if (tok.text == ")") parenLevel--;
                             else if (tok.text == "[") bracketLevel++;
                             else if (tok.text == "]") bracketLevel--;
+                            else if (tok.text == "{") braceLevel++;
+                            else if (tok.text == "}") braceLevel--;
 
-                            if (tok.text == "," && angleLevel == 0 && parenLevel == 0 && bracketLevel == 0) {
+                            if (tok.text == "," && angleLevel == 0 && parenLevel == 0 && bracketLevel == 0 && braceLevel == 0) {
                                 if (currentParam.size() > 0) {
                                     paramGroups.push(currentParam);
                                     currentParam.clear();
@@ -1102,6 +1156,7 @@ void CppHeaderParser::parse(const String& content) {
                                     }
                                 }
                             }
+                            param.type = stripTypeSpaces(param.type);
                             fn.params.push(param);
                         }
                     }
@@ -1113,7 +1168,7 @@ void CppHeaderParser::parse(const String& content) {
                             fnExists = true; break;
                         }
                     }
-                    if (!fnExists) functions.push(fn);
+                    if (!fnExists){ fn.returnType = stripTypeSpaces(fn.returnType); functions.push(fn); };
                     idx = tempIdx;
                     continue;
                 }
