@@ -8,6 +8,33 @@ const files: Record<string, { type: string; contents: Uint8Array }> = {
   "/": { type: "dir", contents: new Uint8Array(0) }
 };
 
+const glfwWindows = new Map();
+let glfwNextWindowId = 1;
+const glfwHints = new Map();
+let glfwCurrentWindow = 0;
+
+function mapJsKeyToGlfw(code: string): number {
+  if (!code) return 0;
+  if (code.startsWith("Key")) {
+    return code.charCodeAt(3); // 'KeyA' -> 65
+  }
+  if (code.startsWith("Digit")) {
+    return code.charCodeAt(5); // 'Digit0' -> 48
+  }
+  const special: Record<string, number> = {
+    "Space": 32, "Enter": 257, "Tab": 258, "Escape": 256,
+    "Backspace": 259, "Insert": 260, "Delete": 261,
+    "ArrowRight": 262, "ArrowLeft": 263, "ArrowDown": 264, "ArrowUp": 265,
+    "PageUp": 266, "PageDown": 267, "Home": 268, "End": 269,
+    "CapsLock": 280, "ScrollLock": 281, "NumLock": 282, "PrintScreen": 283, "Pause": 284,
+    "F1": 290, "F2": 291, "F3": 292, "F4": 293, "F5": 294, "F6": 295,
+    "F7": 296, "F8": 297, "F9": 298, "F10": 299, "F11": 300, "F12": 301,
+    "ShiftLeft": 340, "ControlLeft": 341, "AltLeft": 342, "MetaLeft": 343,
+    "ShiftRight": 344, "ControlRight": 345, "AltRight": 346, "MetaRight": 347,
+  };
+  return special[code] || 0;
+}
+
 function resolvePath(dirPath: string, path: string): string {
   if (path.startsWith("/")) return path;
   const parts = (dirPath + "/" + path).split("/");
@@ -91,6 +118,184 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
       __syscall_sendto: () => 0,
       __syscall_socket: () => 0,
 
+      // ─── GLFW 3 Host Bridge ─────────────────────────────────────────────
+      glfwInit: () => {
+        return 1; // GLFW_TRUE
+      },
+      glfwTerminate: () => {
+        glfwWindows.clear();
+      },
+      glfwWindowHint: (hint: number, value: number) => {
+        glfwHints.set(hint, value);
+      },
+      glfwDefaultWindowHints: () => {
+        glfwHints.clear();
+      },
+      glfwCreateWindow: (width: number, height: number, titlePtr: number, monitor: number, share: number) => {
+        const id = glfwNextWindowId++;
+        let canvas: any = null;
+        if (typeof document !== 'undefined') {
+          canvas = document.querySelector('canvas') || document.createElement('canvas');
+          if (!canvas.parentNode) {
+            document.body.appendChild(canvas);
+          }
+          canvas.width = width;
+          canvas.height = height;
+        }
+        
+        const winState = {
+          id,
+          canvas,
+          width,
+          height,
+          shouldClose: 0,
+          callbacks: {
+            key: 0,
+            cursorPos: 0,
+            mouseButton: 0,
+            scroll: 0,
+            windowSize: 0,
+            framebufferSize: 0,
+          },
+          keys: new Uint8Array(512),
+          mouseButtons: new Uint8Array(8),
+          mouseX: 0,
+          mouseY: 0,
+        };
+
+        if (canvas) {
+          const handleKey = (e: KeyboardEvent, action: number) => {
+            const glfwKey = mapJsKeyToGlfw(e.code);
+            if (glfwKey > 0) {
+              winState.keys[glfwKey] = action;
+              if (winState.callbacks.key) {
+                const func = wasmInstance.exports.__indirect_function_table.get(winState.callbacks.key);
+                func(id, glfwKey, e.keyCode, action, 0);
+              }
+            }
+          };
+          window.addEventListener('keydown', (e) => handleKey(e, 1)); // GLFW_PRESS
+          window.addEventListener('keyup', (e) => handleKey(e, 0));   // GLFW_RELEASE
+
+          canvas.addEventListener('mousedown', (e: MouseEvent) => {
+            const btn = e.button;
+            winState.mouseButtons[btn] = 1;
+            if (winState.callbacks.mouseButton) {
+              const func = wasmInstance.exports.__indirect_function_table.get(winState.callbacks.mouseButton);
+              func(id, btn, 1, 0); // GLFW_PRESS
+            }
+          });
+          canvas.addEventListener('mouseup', (e: MouseEvent) => {
+            const btn = e.button;
+            winState.mouseButtons[btn] = 0;
+            if (winState.callbacks.mouseButton) {
+              const func = wasmInstance.exports.__indirect_function_table.get(winState.callbacks.mouseButton);
+              func(id, btn, 0, 0); // GLFW_RELEASE
+            }
+          });
+          canvas.addEventListener('mousemove', (e: MouseEvent) => {
+            const rect = canvas.getBoundingClientRect();
+            winState.mouseX = e.clientX - rect.left;
+            winState.mouseY = e.clientY - rect.top;
+            if (winState.callbacks.cursorPos) {
+              const func = wasmInstance.exports.__indirect_function_table.get(winState.callbacks.cursorPos);
+              func(id, winState.mouseX, winState.mouseY);
+            }
+          });
+          canvas.addEventListener('wheel', (e: WheelEvent) => {
+            if (winState.callbacks.scroll) {
+              const func = wasmInstance.exports.__indirect_function_table.get(winState.callbacks.scroll);
+              const dx = e.deltaX ? (e.deltaX > 0 ? 1 : -1) : 0;
+              const dy = e.deltaY ? (e.deltaY > 0 ? -1 : 1) : 0;
+              func(id, dx, dy);
+            }
+          });
+        }
+        
+        glfwWindows.set(id, winState);
+        return id;
+      },
+      glfwWindowShouldClose: (winId: number) => {
+        const win = glfwWindows.get(winId);
+        return win ? win.shouldClose : 1;
+      },
+      glfwSetWindowShouldClose: (winId: number, value: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.shouldClose = value;
+      },
+      glfwDestroyWindow: (winId: number) => {
+        glfwWindows.delete(winId);
+      },
+      glfwPollEvents: () => {},
+      glfwWaitEvents: () => {},
+      glfwSetKeyCallback: (winId: number, cbPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.callbacks.key = cbPtr;
+      },
+      glfwSetCursorPosCallback: (winId: number, cbPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.callbacks.cursorPos = cbPtr;
+      },
+      glfwSetMouseButtonCallback: (winId: number, cbPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.callbacks.mouseButton = cbPtr;
+      },
+      glfwSetScrollCallback: (winId: number, cbPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.callbacks.scroll = cbPtr;
+      },
+      glfwSetWindowSizeCallback: (winId: number, cbPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.callbacks.windowSize = cbPtr;
+      },
+      glfwSetFramebufferSizeCallback: (winId: number, cbPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win) win.callbacks.framebufferSize = cbPtr;
+      },
+      glfwGetWindowSize: (winId: number, wPtr: number, hPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win && exports) {
+          const view = new DataView(exports.memory.buffer);
+          view.setInt32(wPtr, win.width, true);
+          view.setInt32(hPtr, win.height, true);
+        }
+      },
+      glfwGetFramebufferSize: (winId: number, wPtr: number, hPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win && exports) {
+          const view = new DataView(exports.memory.buffer);
+          view.setInt32(wPtr, win.width, true);
+          view.setInt32(hPtr, win.height, true);
+        }
+      },
+      glfwGetKey: (winId: number, key: number) => {
+        const win = glfwWindows.get(winId);
+        return win ? win.keys[key] : 0;
+      },
+      glfwGetMouseButton: (winId: number, button: number) => {
+        const win = glfwWindows.get(winId);
+        return win ? win.mouseButtons[button] : 0;
+      },
+      glfwGetCursorPos: (winId: number, xPtr: number, yPtr: number) => {
+        const win = glfwWindows.get(winId);
+        if (win && exports) {
+          const view = new DataView(exports.memory.buffer);
+          view.setFloat64(xPtr, win.mouseX, true);
+          view.setFloat64(yPtr, win.mouseY, true);
+        }
+      },
+      glfwMakeContextCurrent: (winId: number) => {
+        glfwCurrentWindow = winId;
+      },
+      glfwGetCurrentContext: () => {
+        return glfwCurrentWindow;
+      },
+      glfwSwapBuffers: (winId: number) => {},
+      glfwGetTime: () => {
+        return performance.now() / 1000.0;
+      },
+      glfwSetTime: (time: number) => {},
+
       // ─── xic fetch API ──────────────────────────────────────────────────
       xic_fetch_get: (urlPtr: number, onSuccessPtr: number, onErrorPtr: number) => {
         const memory = exports || wasmMemory;
@@ -152,30 +357,39 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
           });
       },
 
-      // ─── Standard WebGPU C API to JS Host Bridge ──────────────────────
+      // ─── Standard WebGPU C API to JS Host Bridge (4-Arg Callback Standard compliant) ──────────────────────
       wgpuRequestAdapter: (canvasIdPtr: number, callbackPtr: number, userdata: number) => {
         if (!navigator.gpu) {
           console.error("WebGPU not supported on this browser.");
-          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
+          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(4, 0, 0, userdata); // status = 4 (Error)
           return;
         }
         const canvasId = readString(canvasIdPtr);
         navigator.gpu.requestAdapter().then(adapter => {
           if (!adapter) {
-            wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
+            wasmInstance.exports.__indirect_function_table.get(callbackPtr)(3, 0, 0, userdata); // status = 3 (Unavailable)
             return;
           }
           const id = regGpu(adapter);
-          const canvas = document.getElementById(canvasId);
+          const canvas = (typeof document !== 'undefined') ? document.getElementById(canvasId) : null;
           if (canvas) {
             (adapter as any)._canvas = canvas;
           }
-          // Pass 2 arguments: (adapterId, userdata)
-          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(id, userdata);
+          // Pass 4 arguments: (WGPURequestAdapterStatus status, WGPUAdapter adapter, char const * message, void * userdata)
+          const func = wasmInstance.exports.__indirect_function_table.get(callbackPtr);
+          if (func.length === 4) {
+             func(1, id, 0, userdata); // status = 1 (Success) [1.1.8]
+          } else {
+             func(id, userdata); // Fallback to 2-args
+          }
         }).catch((err) => {
           console.error("Adapter request failed:", err);
-          // Pass 2 arguments: (0, userdata)
-          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
+          const func = wasmInstance.exports.__indirect_function_table.get(callbackPtr);
+          if (func.length === 4) {
+             func(4, 0, 0, userdata); // status = 4 (Error) [1.1.8]
+          } else {
+             func(0, userdata); // Fallback to 2-args
+          }
         });
       },
 
@@ -189,12 +403,21 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
             context.configure({ device, format, alphaMode: "opaque" });
             device._contextId = regGpu(context);
           }
-          // Pass 2 arguments: (deviceId, userdata)
-          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(id, userdata);
+          // Pass 4 arguments: (WGPURequestDeviceStatus status, WGPUDevice device, char const * message, void * userdata)
+          const func = wasmInstance.exports.__indirect_function_table.get(callbackPtr);
+          if (func.length === 4) {
+             func(1, id, 0, userdata); // status = 1 (Success) [1.1.8]
+          } else {
+             func(id, userdata); // Fallback to 2-args
+          }
         }).catch((err) => {
           console.error("Device request failed:", err);
-          // Pass 2 arguments: (0, userdata)
-          wasmInstance.exports.__indirect_function_table.get(callbackPtr)(0, userdata);
+          const func = wasmInstance.exports.__indirect_function_table.get(callbackPtr);
+          if (func.length === 4) {
+             func(3, 0, 0, userdata); // status = 3 (Error) [1.1.8]
+          } else {
+             func(0, userdata); // Fallback to 2-args
+          }
         });
       },
       wgpuDeviceGetQueue: (deviceId: number) => {
@@ -233,7 +456,8 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
       wgpuBufferWrite: (queueId: number, bufferId: number, bufferOffset: number, dataPtr: number, size: number) => {
         const queue = gpuRegistry.get(queueId);
         const buffer = gpuRegistry.get(bufferId);
-        const view = new Uint8Array(wasmMemory.buffer, dataPtr, size);
+        const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+        const view = new Uint8Array(activeMemory, dataPtr, size);
         queue.writeBuffer(buffer, bufferOffset, view, 0, size);
       },
 
@@ -305,8 +529,8 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
           label: labelPtr ? readString(labelPtr) : undefined
         });
 
-        // FIX: Propagate the context ID from the device to the encoder
         encoder._contextId = device._contextId;
+        encoder.device = device;
 
         return regGpu(encoder);
       },
@@ -330,7 +554,8 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
         const bg = gpuRegistry.get(bindGroupId);
         let offsets: number[] | undefined = undefined;
         if (dynamicOffsetCount > 0 && dynamicOffsetsPtr) {
-          offsets = Array.from(new Uint32Array(wasmMemory.buffer, dynamicOffsetsPtr, dynamicOffsetCount));
+          const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+          offsets = Array.from(new Uint32Array(activeMemory, dynamicOffsetsPtr, dynamicOffsetCount));
         }
         pass.setBindGroup(groupIndex, bg, offsets);
       },
@@ -357,7 +582,6 @@ export async function init(wasmUrl: string, args: string[] = []): Promise<void> 
 
       wgpuQueueSubmit: (queueId: number, commandCount: number, commandsPtr: number) => {
         const queue = gpuRegistry.get(queueId);
-        // Dynamically get the active memory buffer
         const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
         const view = new Uint32Array(activeMemory, commandsPtr, commandCount);
         const commandBuffers: any[] = [];
@@ -679,7 +903,8 @@ function writeString(str: string): number {
   const encoder = new TextEncoder();
   const bytes = encoder.encode(str);
   const ptr = exports.alloc_buf(bytes.length + 1);
-  const view = new Uint8Array(exports.memory.buffer, ptr, bytes.length + 1);
+  const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+  const view = new Uint8Array(activeMemory, ptr, bytes.length + 1);
   view.set(bytes);
   view[bytes.length] = 0;
   return ptr;
@@ -688,21 +913,24 @@ function writeString(str: string): number {
 function writeBuffer(buf: Uint8Array | string): { ptr: number, len: number } {
   const bytes = typeof buf === 'string' ? new TextEncoder().encode(buf) : buf;
   const ptr = exports.alloc_buf(bytes.length);
-  const view = new Uint8Array(exports.memory.buffer, ptr, bytes.length);
+  const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+  const view = new Uint8Array(activeMemory, ptr, bytes.length);
   view.set(bytes);
   return { ptr, len: bytes.length };
 }
 
 function readString(ptr: number): string {
-  const view = new Uint8Array(exports.memory.buffer, ptr);
+  const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+  const view = new Uint8Array(activeMemory, ptr);
   let len = 0;
   while (view[len] !== 0) len++;
-  const bytes = new Uint8Array(exports.memory.buffer, ptr, len);
+  const bytes = new Uint8Array(activeMemory, ptr, len);
   return new TextDecoder().decode(bytes);
 }
 
 function readBinaryString(ptr: number, size: number): string {
-  const bytes = new Uint8Array(exports.memory.buffer, ptr, size);
+  const activeMemory = exports?.memory?.buffer || wasmMemory.buffer;
+  const bytes = new Uint8Array(activeMemory, ptr, size);
   let res = '';
   for (let i = 0; i < bytes.length; ++i) res += String.fromCharCode(bytes[i]);
   return res;

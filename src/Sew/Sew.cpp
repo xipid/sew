@@ -941,8 +941,10 @@ bool Engine::build(const String& targetName) {
                 }
                 wasmOutput += ".wasm";
 
-                if (onCacheHas(globalKey + "_wasm")) {
-                    cachedWasmPath = onCacheGet(globalKey + "_wasm");
+                // Use a separate, valid 64-character hash for the WASM cache key
+                String globalWasmKey = Cache::computeKey(globalInput + ":wasm", targetName, {}, {});
+                if (onCacheHas(globalWasmKey)) {
+                    cachedWasmPath = onCacheGet(globalWasmKey);
                     if (cachedWasmPath.length() == 0) {
                         wasmOk = false;
                     }
@@ -1287,8 +1289,10 @@ bool Engine::build(const String& targetName) {
             }
             wasmOutput += ".wasm";
 
+            // Save the WASM binary under its own unique 64-character key
+            String globalWasmKey = Cache::computeKey(globalInput + ":wasm", targetName, {}, {});
             if (::access(wasmOutput.c_str(), 0) == 0) {
-                onCacheSet(globalKey + "_wasm", wasmOutput);
+                onCacheSet(globalWasmKey, wasmOutput);
             }
         }
     }
@@ -1520,6 +1524,75 @@ void Engine::queueCompile(usz nodeIdx, Target* target, const String& targetName)
     }
     
     String tempDir = getTempDir();
+
+    String includeDir = tempDir + "/include";
+    String glfwDir = includeDir + "/GLFW";
+    ::mkdir(includeDir.c_str(), 0755);
+    ::mkdir(glfwDir.c_str(), 0755);
+
+    // Create a mock GLFW/glfw3.h for the WASM compiler
+    String mockGlfw;
+    mockGlfw += "#pragma once\n";
+    mockGlfw += "#include <stdint.h>\n";
+    mockGlfw += "#include <stdbool.h>\n\n";
+    mockGlfw += "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
+    mockGlfw += "typedef struct GLFWwindow GLFWwindow;\n";
+    mockGlfw += "typedef struct GLFWmonitor GLFWmonitor;\n";
+    mockGlfw += "typedef struct GLFWcursor GLFWcursor;\n\n";
+    mockGlfw += "typedef void (*GLFWwindowsizefun)(GLFWwindow*, int, int);\n";
+    mockGlfw += "typedef void (*GLFWframebuffersizefun)(GLFWwindow*, int, int);\n";
+    mockGlfw += "typedef void (*GLFWmousebuttonfun)(GLFWwindow*, int, int, int);\n";
+    mockGlfw += "typedef void (*GLFWcursorposfun)(GLFWwindow*, double, double);\n";
+    mockGlfw += "typedef void (*GLFWscrollfun)(GLFWwindow*, double, double);\n";
+    mockGlfw += "typedef void (*GLFWkeyfun)(GLFWwindow*, int, int, int, int);\n\n";
+    mockGlfw += "#define GLFW_TRUE 1\n";
+    mockGlfw += "#define GLFW_FALSE 0\n";
+    mockGlfw += "#define GLFW_RELEASE 0\n";
+    mockGlfw += "#define GLFW_PRESS 1\n";
+    mockGlfw += "#define GLFW_REPEAT 2\n";
+    mockGlfw += "#define GLFW_CLIENT_API 0x00030001\n";
+    mockGlfw += "#define GLFW_NO_API 0\n";
+    mockGlfw += "#define GLFW_PLATFORM 0x00050003\n";
+    mockGlfw += "#define GLFW_PLATFORM_X11 0x00060002\n";
+    mockGlfw += "#define GLFW_KEY_ESCAPE 256\n\n";
+    mockGlfw += "int glfwInit(void);\n";
+    mockGlfw += "void glfwTerminate(void);\n";
+    mockGlfw += "void glfwInitHint(int hint, int value);\n";
+    mockGlfw += "void glfwWindowHint(int hint, int value);\n";
+    mockGlfw += "GLFWwindow* glfwCreateWindow(int width, int height, const char* title, GLFWmonitor* monitor, GLFWwindow* share);\n";
+    mockGlfw += "int glfwWindowShouldClose(GLFWwindow* window);\n";
+    mockGlfw += "void glfwSetWindowShouldClose(GLFWwindow* window, int value);\n";
+    mockGlfw += "void glfwDestroyWindow(GLFWwindow* window);\n";
+    mockGlfw += "void glfwPollEvents(void);\n";
+    mockGlfw += "void glfwSetWindowUserPointer(GLFWwindow* window, void* pointer);\n";
+    mockGlfw += "void* glfwGetWindowUserPointer(GLFWwindow* window);\n";
+    mockGlfw += "GLFWkeyfun glfwSetKeyCallback(GLFWwindow* window, GLFWkeyfun callback);\n";
+    mockGlfw += "GLFWcursorposfun glfwSetCursorPosCallback(GLFWwindow* window, GLFWcursorposfun callback);\n";
+    mockGlfw += "GLFWmousebuttonfun glfwSetMouseButtonCallback(GLFWwindow* window, GLFWmousebuttonfun callback);\n";
+    mockGlfw += "GLFWscrollfun glfwSetScrollCallback(GLFWwindow* window, GLFWscrollfun callback);\n";
+    mockGlfw += "GLFWframebuffersizefun glfwSetFramebufferSizeCallback(GLFWwindow* window, GLFWframebuffersizefun callback);\n";
+    mockGlfw += "void glfwGetFramebufferSize(GLFWwindow* window, int* width, int* height);\n";
+    mockGlfw += "void glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);\n";
+    mockGlfw += "#ifdef __cplusplus\n}\n#endif\n";
+
+    // Write mock files to the temp cached directories
+    FILE* f_glfw = fopen((glfwDir + "/glfw3.h").c_str(), "w");
+    if (f_glfw) {
+        fwrite(mockGlfw.data(), 1, mockGlfw.size(), f_glfw);
+        fclose(f_glfw);
+    }
+
+    String mockGlfwNative = "#pragma once\n";
+    FILE* f_glfw_native = fopen((glfwDir + "/glfw3native.h").c_str(), "w");
+    if (f_glfw_native) {
+        fwrite(mockGlfwNative.data(), 1, mockGlfwNative.size(), f_glfw_native);
+        fclose(f_glfw_native);
+    }
+
+    // Append our generated include path to the build request options
+    // req.includePaths.push(includeDir);
+    // cppLang->preprocessor().includePaths.preprocessor().includePaths.push(includeDir);
+
     String safePath = node.path;
     safePath = safePath.replace("/", "_");
     safePath = safePath.replace("\\", "_");

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebGPU Canvas Clear Animation</title>
+    <title>GLFW WASM Event Test</title>
     <style>
         body {
             background: #111;
@@ -16,19 +16,47 @@
         }
         canvas {
             border: 2px solid #555;
-            background: #000;
+            background: #222;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        }
+        #console-log {
+            margin-top: 15px;
+            width: 640px;
+            height: 100px;
+            background: #000;
+            color: #0f0;
+            font-family: monospace;
+            padding: 10px;
+            overflow-y: auto;
+            border: 1px solid #333;
         }
     </style>
 </head>
 <body>
-    <h1>WebGPU Clear Canvas Animation (C++ to WASM)</h1>
+    <h1>GLFW 3 WASM Input Test</h1>
+    <p>Click on the canvas below and press keys or move your mouse. Press <strong>ESC</strong> to terminate.</p>
+    
+    <!-- This canvas will be associated with our GLFWwindow handle -->
     <canvas id="myCustomCanvas" width="640" height="480"></canvas>
+    
+    <div id="console-log">Console output will appear here...</div>
 
     <script type="module">
-        import { init, getExports } from "./index.ts";
+        import { init, getExports } from "./index.js";
+
+        // Intercept standard console output to display directly in the UI
+        const consoleLog = document.getElementById("console-log");
+        const originalLog = console.log;
+        console.log = function (message) {
+            originalLog.apply(console, arguments);
+            const line = document.createElement("div");
+            line.textContent = message;
+            consoleLog.appendChild(line);
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        };
 
         async function main() {
+            // Load and initialize the WASM binary
             await init("./index.wasm", ["myCustomCanvas"]);
             const exports = getExports();
             if (exports._start) {

@@ -681,12 +681,23 @@ int main(int argc, char** argv) {
     };
 
     // Cache callbacks
+    // Cache callbacks
     if (!noCache) {
         sew.onCacheGet = [](String key) -> String {
             return Cache::get(key);
         };
         sew.onCacheSet = [](String key, String local_path) {
-            String cacheObjPath = Cache::cacheDir() + "/" + key + ".o";
+            // Dynamically preserve the original file extension (.js, .wasm, .o, etc.)
+            String ext = ".o";
+            long long dotPos = -1;
+            for (usz i = 0; i < local_path.length(); ++i) {
+                if (local_path.data()[i] == '.') dotPos = (long long)i;
+            }
+            if (dotPos >= 0) {
+                ext = local_path.substring((usz)dotPos);
+            }
+            
+            String cacheObjPath = Cache::cacheDir() + "/" + key + ext;
             String bytes = readFile(local_path);
             if (bytes.size() > 0) {
                 writeFile(cacheObjPath, bytes);

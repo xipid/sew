@@ -1,73 +1,79 @@
 #include <Languages/JS/WASI/WASI.hpp>
 #include <stdio.h>
-#include <cmath>
 
-static WGPUDevice g_device = 0;
-static WGPUQueue g_queue = 0;
-static double g_time = 0.0;
+static GLFWwindow* g_window = nullptr;
+static double last_x = -1.0;
+static double last_y = -1.0;
 
-extern "C" {
-    void render_frame();
-}
-
-void render_frame() {
-    g_time += 0.015;
-    
-    // Animate background clear colors using sine waves
-    double r = (1.0 + std::sin(g_time)) * 0.5;
-    double g = (1.0 + std::sin(g_time + 2.0)) * 0.5;
-    double b = (1.0 + std::sin(g_time + 4.0)) * 0.5;
-    
-    // 1. Create a fresh command encoder for this frame
-    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, "Clear Encoder");
-    
-    // 2. Set up standard Render Pass with a Color Attachment to clear the canvas
-    WGPURenderPassColorAttachment colorAttachment = {};
-    colorAttachment.view = 0;           // 0 triggers JS-side getCurrentTexture().createView() automatically
-    colorAttachment.resolveTarget = 0;
-    colorAttachment.loadOp = 1;         // 1 = WGPULoadOp_Clear
-    colorAttachment.storeOp = 1;        // 1 = WGPUStoreOp_Store
-    colorAttachment.clearValue = { r, g, b, 1.0 };
-    
-    WGPURenderPassDescriptor renderPassDesc = {};
-    renderPassDesc.colorAttachmentCount = 1;
-    renderPassDesc.colorAttachments = &colorAttachment;
-    
-    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
-    wgpuRenderPassEncoderEnd(pass);
-    
-    // 3. Finish and submit Command Buffer to Queue
-    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, "Frame Command Buffer");
-    wgpuQueueSubmit(g_queue, 1, &cmd);
-    
-    // 4. Request Next Frame
-    jsRequestAnimationFrame(render_frame);
-}
-
-void on_device_ready(WGPUDevice device, void* userdata) {
-    if (!device) {
-        fprintf(stderr, "Failed to initialize WebGPU device.\n");
+void update_loop() {
+    if (glfwWindowShouldClose(g_window)) {
+        printf("Window close requested. Terminating GLFW...\n");
+        fflush(stdout);
+        glfwDestroyWindow(g_window);
+        glfwTerminate();
         return;
     }
-    g_device = device;
-    g_queue = wgpuDeviceGetQueue(device);
-    render_frame();
-}
 
-void on_adapter_ready(WGPUAdapter adapter, void* userdata) {
-    if (adapter == 0) {
-        fprintf(stderr, "Error: Failed to obtain WebGPU adapter\n");
-        return;
+    // Process pending events
+    glfwPollEvents();
+
+    // Query cursor coordinates
+    double xpos = 0.0, ypos = 0.0;
+    glfwGetCursorPos(g_window, &xpos, &ypos);
+
+    // Print to console only when the coordinates change
+    if (xpos != last_x || ypos != last_y) {
+        printf("Mouse Position: x = %.1f, y = %.1f\n", xpos, ypos);
+        fflush(stdout); // Force immediate print to browser console
+        last_x = xpos;
+        last_y = ypos;
     }
-    wgpuAdapterRequestDevice(adapter, on_device_ready, nullptr);
+
+    // Request next frame
+    jsRequestAnimationFrame(update_loop);
 }
 
-int main(int argc, char* argv[]) {
+// GLFW key callback
+static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    printf("C++ Key Event Received: key = %d, action = %d\n", key, action);
+    fflush(stdout); // Force immediate print to browser console
+    
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+}
+
+
+int main() {
+    // Disable stdout buffering completely for WASI-libc
     setvbuf(stdout, NULL, _IONBF, 0);
-    const char* canvasId = "gpuCanvas";
-    if (argc > 1 && argv[1] != nullptr) {
-        canvasId = argv[1];
+
+    printf("Initializing GLFW...\n");
+    fflush(stdout);
+
+    if (!glfwInit()) {
+        fprintf(stderr, "Failed to initialize GLFW\n");
+        fflush(stderr);
+        return -1;
     }
-    wgpuRequestAdapter(canvasId, on_adapter_ready, nullptr);
+
+    printf("Creating GLFW window mapping to target canvas...\n");
+    fflush(stdout);
+
+    g_window = glfwCreateWindow(640, 480, "GLFW WASM Test Window", nullptr, nullptr);
+    if (!g_window) {
+        fprintf(stderr, "Failed to create GLFW window\n");
+        fflush(stderr);
+        glfwTerminate();
+        return -1;
+    }
+
+    glfwSetKeyCallback(g_window, key_callback);
+
+    printf("GLFW window set up. Starting frame loop...\n");
+    fflush(stdout);
+
+    update_loop();
+    
     return 0;
 }
