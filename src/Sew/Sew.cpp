@@ -538,9 +538,8 @@ void Engine::find(const String& targetName) {
                 }
             }
 
-            // Skip engine internal, framework, and third-party dependency headers for JS reflection/bindings
             if (node.path.includes("/sew/include/") || node.path.includes("include/Languages/") || node.path.includes("include/Sew/") ||
-                node.path.includes("/xic/include/Collection/") || node.path.includes("/xic/include/Terminal/") ||
+                node.path.includes("/xic/include/") ||
                 node.path.includes("/xic/packages/") ||
                 node.path.includes("/deps/") || node.path.includes("/thirdparty/") ||
                 node.path.includes("/diligent/") || node.path.includes("/glfw/")) {

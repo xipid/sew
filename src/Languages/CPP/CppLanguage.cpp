@@ -967,6 +967,8 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
       std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
       classesCopy = g_allParsedClasses;
   }
+  ::printf("Compiling %s: classesCopy size is %d\n", req.sourcePath.c_str(), (int)classesCopy.size());
+  ::fflush(stdout);
   String rewritten = rewriteCppSource(req.sourceContent, classesCopy);
 
   String safePath = req.sourcePath;
