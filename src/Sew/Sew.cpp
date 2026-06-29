@@ -20,6 +20,8 @@
 
 namespace Sew {
 
+static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Map<usz, bool>& visited);
+
 static String canonicalize(const String& path) {
     char* rp = ::realpath(path.c_str(), nullptr);
     if (rp) {
@@ -538,10 +540,14 @@ void Engine::find(const String& targetName) {
 
             // Skip engine internal, framework, and third-party dependency headers for JS reflection/bindings
             if (node.path.includes("/sew/include/") || node.path.includes("include/Languages/") || node.path.includes("include/Sew/") ||
-                node.path.includes("/xic/include/") || node.path.includes("/xic/packages/") ||
+                node.path.includes("/xic/include/Collection/") || node.path.includes("/xic/include/Terminal/") ||
+                node.path.includes("/xic/packages/") ||
                 node.path.includes("/deps/") || node.path.includes("/thirdparty/") ||
                 node.path.includes("/diligent/") || node.path.includes("/glfw/")) {
                 continue;
+            }
+            if (node.content.isEmpty() && !node.path.isEmpty()) {
+                if (onRead) node.content = onRead(node.path);
             }
             ppResult = preprocessor.process(node.content, node.path);
             parser.parse(ppResult.strippedSource);
@@ -829,6 +835,14 @@ bool Engine::build(const String& targetName) {
     for (usz stepIdx = 0; stepIdx < _plan.steps.size(); ++stepIdx) {
         BuildStep& step = _plan.steps[stepIdx];
 
+        if (onInfo) {
+            String msg = "Step " + String((long long)stepIdx) + " nodes:";
+            for (usz i = 0; i < step.nodeIndices.size(); ++i) {
+                msg += "\n  - " + _graph.nodes[step.nodeIndices[i]].path;
+            }
+            onInfo(msg);
+        }
+
         unsigned int numCores = std::thread::hardware_concurrency();
         if (numCores == 0) numCores = 4;
 
@@ -873,6 +887,9 @@ bool Engine::build(const String& targetName) {
                             skip = true;
                         } else {
                             nodePath = node.path;
+                            if (node.content.isEmpty() && !nodePath.isEmpty()) {
+                                if (onRead) node.content = onRead(nodePath);
+                            }
                             nodeContent = node.content;
 
                             String ext;
@@ -900,8 +917,13 @@ bool Engine::build(const String& targetName) {
 
                                 // Check cache
                                 bool isPic = outputPath.endsWith(".so");
+                                Array<String> depHashes;
+                                Map<usz, bool> visited;
+                                for (usz i = 0; i < node.dependencies.size(); ++i) {
+                                    collectDepHashesRecursive(_graph, node.dependencies[i], depHashes, visited);
+                                }
                                 cacheKey = Cache::computeKey(
-                                    nodeContent + (isPic ? ":fPIC" : ""), targetName, {}, {});
+                                    nodeContent + (isPic ? ":fPIC" : ""), targetName, {}, depHashes);
 
                                 if (onCacheHas && onCacheHas(cacheKey)) {
                                     cachedHit = true;

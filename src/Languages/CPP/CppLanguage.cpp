@@ -87,6 +87,50 @@ static String stripReference(const String& typeStr) {
     return t;
 }
 
+static bool isClassType(const String& typeStr, const Array<ParsedClass>& classes, String& outClassName) {
+    String clean = typeStr;
+    if (clean.endsWith("&")) clean = clean.substring(0, clean.length() - 1).trim();
+    if (clean.endsWith("*")) clean = clean.substring(0, clean.length() - 1).trim();
+    if (clean.startsWith("const")) clean = clean.substring(5).trim();
+
+    for (usz i = 0; i < classes.size(); ++i) {
+        String fullName = classes[i].name;
+        if (clean == fullName) {
+            outClassName = fullName;
+            return true;
+        }
+        if (fullName.endsWith("::" + clean)) {
+            outClassName = fullName;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool isAbstractClass(const ParsedClass& cls) {
+    for (usz m = 0; m < cls.methods.size(); ++m) {
+        if (cls.methods[m].isPureVirtual) return true;
+    }
+    bool inheritsTreeItem = false;
+    for (usz i = 0; i < cls.parentClasses.size(); ++i) {
+        if (cls.parentClasses[i] == "TreeItem" || cls.parentClasses[i] == "Collection::TreeItem" || cls.parentClasses[i] == "public TreeItem") {
+            inheritsTreeItem = true;
+            break;
+        }
+    }
+    if (inheritsTreeItem) {
+        bool implementsClone = false;
+        for (usz m = 0; m < cls.methods.size(); ++m) {
+            if (cls.methods[m].name == "clone") {
+                implementsClone = true;
+                break;
+            }
+        }
+        if (!implementsClone) return true;
+    }
+    return false;
+}
+
 static String generateMetadataBlock(const Array<ParsedClass>& classes) {
     String out;
     out += "\n\n// === Generated Sew Reflection Metadata ===\n";
@@ -148,9 +192,25 @@ static String generateMetadataBlock(const Array<ParsedClass>& classes) {
                 out += "    " + callStr + ";\n";
                 out += "    return nullptr;\n";
             } else {
-                out += "    static " + method.returnType + " ret;\n";
-                out += "    ret = " + callStr + ";\n";
-                out += "    return &ret;\n";
+                String retType = method.returnType;
+                String className;
+                if (isClassType(retType, classes, className)) {
+                    if (retType.endsWith("*")) {
+                        retType = className + "*";
+                    } else if (retType.endsWith("&")) {
+                        retType = className + "&";
+                    } else {
+                        retType = className;
+                    }
+                }
+
+                if (retType.endsWith("&")) {
+                    out += "    return (void*)&(" + callStr + ");\n";
+                } else {
+                    out += "    static " + retType + " ret;\n";
+                    out += "    ret = " + callStr + ";\n";
+                    out += "    return &ret;\n";
+                }
             }
             out += "}\n\n";
         }
@@ -173,6 +233,12 @@ static String generateMetadataBlock(const Array<ParsedClass>& classes) {
             }
         }
         bool canDefaultConstruct = !hasAnyConstructor || hasDefaultConstructor;
+        if (cls.name == "Log" || cls.name == "Xi::Log" || cls.name == "Graphics::Screen" || cls.name == "Screen") {
+            canDefaultConstruct = false;
+        }
+        if (isAbstractClass(cls)) {
+            canDefaultConstruct = false;
+        }
         if (canDefaultConstruct) {
             out += "        d.factory = []() -> void* { return new " + cls.name + "(); };\n";
         }
@@ -266,6 +332,11 @@ static inline bool isSpace(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+static inline bool matchesAtIndex(const String& source, usz index, const String& target) {
+    if (index + target.length() > source.length()) return false;
+    return memcmp(source.data() + index, target.data(), target.length()) == 0;
+}
+
 static Array<DetectedVar> detectGlobalVars(const String& source, const Array<ParsedClass>& classes) {
     Array<DetectedVar> result;
     int braceDepth = 0;
@@ -337,7 +408,7 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
                 const String& className = classes[ci].name;
                 if (className.indexOf('<') >= 0) continue;
                 
-                if (source.substring(i, i + className.length()) == className) {
+                if (matchesAtIndex(source, i, className)) {
                     bool boundaryBefore = (i == 0 || !isAlnum(source[i - 1]) && source[i - 1] != '_');
                     usz nextPos = i + className.length();
                     bool boundaryAfter = (nextPos >= source.length() || !isAlnum(source[nextPos]) && source[nextPos] != '_');
@@ -491,19 +562,19 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
             String rc = "reinterpret_cast<" + className + "*>";
             String cc = "const_cast<" + className + "*>";
             
-            if (source.substring(i, i + sc.length()) == sc) {
+            if (matchesAtIndex(source, i, sc)) {
                 rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
                 i += sc.length();
                 castMatched = true;
                 break;
             }
-            if (source.substring(i, i + rc.length()) == rc) {
+            if (matchesAtIndex(source, i, rc)) {
                 rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
                 i += rc.length();
                 castMatched = true;
                 break;
             }
-            if (source.substring(i, i + cc.length()) == cc) {
+            if (matchesAtIndex(source, i, cc)) {
                 rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
                 i += cc.length();
                 castMatched = true;
@@ -511,14 +582,14 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
             }
             
             String cstyle = "(" + className + "*)(";
-            if (source.substring(i, i + cstyle.length()) == cstyle) {
+            if (matchesAtIndex(source, i, cstyle)) {
                 rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>(";
                 i += cstyle.length();
                 castMatched = true;
                 break;
             }
             String cstyle_space = "(" + className + " *)(";
-            if (source.substring(i, i + cstyle_space.length()) == cstyle_space) {
+            if (matchesAtIndex(source, i, cstyle_space)) {
                 rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>(";
                 i += cstyle_space.length();
                 castMatched = true;
@@ -534,7 +605,7 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
             const String& name = var.name;
             const String& type = var.type;
             
-            if (source.substring(i, i + name.length()) == name) {
+            if (matchesAtIndex(source, i, name)) {
                 bool boundaryBefore = (i == 0 || !isAlnum(source[i - 1]) && source[i - 1] != '_');
                 usz nextPos = i + name.length();
                 bool boundaryAfter = (nextPos >= source.length() || !isAlnum(source[nextPos]) && source[nextPos] != '_');
@@ -872,11 +943,22 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
 
   if (req.sourcePath.endsWith("Reflection.cpp") || req.sourcePath.endsWith("sew_bridge.cpp")) {
     CompileRequest modReq = req;
+    PreprocessorResult ppResult = _preprocessor.process(req.sourceContent, req.sourcePath);
     Array<String> searchPaths = _preprocessor.getSearchPaths(req.sourcePath);
     for (usz i = 0; i < searchPaths.size(); ++i) {
         modReq.includePaths.push(searchPaths[i]);
     }
-    PreprocessorResult ppResult = _preprocessor.process(req.sourceContent, req.sourcePath);
+    for (usz i = 0; i < req.includePaths.size(); ++i) {
+        if (req.includePaths[i].includes("/xic/")) {
+            long long idx = req.includePaths[i].indexOf("/xic/");
+            if (idx >= 0) {
+                String xicRoot = req.includePaths[i].substring(0, (usz)idx + 4);
+                String dilRoot = xicRoot + "/deps/diligent";
+                modReq.includePaths.push(dilRoot);
+                modReq.includePaths.push(dilRoot + "/Platforms/interface");
+            }
+        }
+    }
     return invokeClang(modReq, ppResult.strippedSource);
   }
 
@@ -1073,6 +1155,11 @@ CompileResult CppLanguage::invokeClang(const CompileRequest &req,
       p.arg.push("-I");
       p.arg.push(paths[i]);
     }
+  }
+
+  if (req.sourcePath.includes("sew_bridge") || req.sourcePath.includes("sew_qjs_bindings")) {
+      p.arg.push("-O0");
+      p.arg.push("-g0");
   }
 
   // Source file

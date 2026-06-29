@@ -385,7 +385,66 @@ int main(int argc, char** argv) {
         parseArgc = separatorIndex;
     }
 
-    Command args(parseArgc, argv);
+    // Preprocess arguments to separate recognized sew options from arbitrary compiler flags
+    Array<String> parseTokens;
+    parseTokens.push(argv[0]); // Program name
+    String extraFlagsStr;
+
+    Array<String> knownOptions;
+    knownOptions.push("-t"); knownOptions.push("--target");
+    knownOptions.push("-o"); knownOptions.push("--output");
+    knownOptions.push("-i"); knownOptions.push("--include");
+    knownOptions.push("-p"); knownOptions.push("--progress");
+    knownOptions.push("-h"); knownOptions.push("--help");
+    knownOptions.push("-v"); knownOptions.push("--version");
+    knownOptions.push("--shared");
+    knownOptions.push("--cache");
+    knownOptions.push("--no-cache");
+    knownOptions.push("--stdin");
+    knownOptions.push("--assets");
+
+    Array<String> optionsWithArgs;
+    optionsWithArgs.push("-t"); optionsWithArgs.push("--target");
+    optionsWithArgs.push("-o"); optionsWithArgs.push("--output");
+    optionsWithArgs.push("-i"); optionsWithArgs.push("--include");
+    optionsWithArgs.push("--stdin");
+    optionsWithArgs.push("--assets");
+
+    int limit = (separatorIndex >= 0) ? separatorIndex : argc;
+    for (int i = 1; i < limit; ++i) {
+        String arg = argv[i];
+        if (arg.startsWith("-")) {
+            bool isKnown = false;
+            for (usz j = 0; j < knownOptions.size(); ++j) {
+                if (arg == knownOptions[j]) {
+                    isKnown = true;
+                    break;
+                }
+            }
+            if (isKnown) {
+                parseTokens.push(arg);
+                bool hasVal = false;
+                for (usz j = 0; j < optionsWithArgs.size(); ++j) {
+                    if (arg == optionsWithArgs[j]) {
+                        hasVal = true;
+                        break;
+                    }
+                }
+                if (hasVal && i + 1 < limit) {
+                    parseTokens.push(argv[i + 1]);
+                    i++;
+                }
+            } else {
+                extraFlagsStr += arg;
+                extraFlagsStr += " ";
+            }
+        } else {
+            parseTokens.push(arg);
+        }
+    }
+
+    Command args;
+    args.parse(parseTokens);
     args.description("sew — polyglot build system").version("1.0.0");
 
     // --- Options ---
@@ -396,6 +455,11 @@ int main(int argc, char** argv) {
     String output = args.option("--output -o")
         .description("Output file path")
         .string();
+
+    bool shared = args.flag("--shared").active;
+    if (output.endsWith(".so")) {
+        shared = true;
+    }
 
     String assets = args.option("--assets")
         .description("Assets output directory")
@@ -429,9 +493,19 @@ int main(int argc, char** argv) {
     if (cacheOpt.active && cacheOpt.value.size() > 0 && cacheOpt.value[0] == "false") {
         noCache = true;
     }
-    // Also support querying --no-cache directly if the parser doesn't negate it in all versions
     if (args.flag("--no-cache").active) {
         noCache = true;
+    }
+
+    const char* existingFlags = ::getenv("SEW_EXTRA_FLAGS");
+    if (existingFlags) {
+        extraFlagsStr = String(existingFlags) + " " + extraFlagsStr;
+    }
+    if (shared) {
+        extraFlagsStr += "-shared ";
+    }
+    if (!extraFlagsStr.isEmpty()) {
+        ::setenv("SEW_EXTRA_FLAGS", extraFlagsStr.trim().c_str(), 1);
     }
 
 
@@ -644,7 +718,7 @@ int main(int argc, char** argv) {
 
     // ─── Run Mode (Eval / REPL) ─────────────────────────────────────────
 
-    if (stdinLang.length() > 0 && target.length() == 0) {
+    if (stdinLang.length() > 0 && target.length() == 0 && output.length() == 0) {
         quiet = true;
         bool runQuiet = true;
 
@@ -807,6 +881,16 @@ int main(int argc, char** argv) {
             target = "js";
         } else if (output.endsWith(".py")) {
             target = "py";
+        } else {
+#if defined(__x86_64__) || defined(_M_X64)
+            target = "amd";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+            target = "arm";
+#elif defined(__riscv)
+            target = "risc";
+#else
+            target = "amd";
+#endif
         }
     }
 

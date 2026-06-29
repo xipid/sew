@@ -509,6 +509,11 @@ Array<String> CppPreprocessor::getSearchPaths(const String& currentFile) {
     while (!checkDir.isEmpty()) {
         checkDir = canonicalizePath(checkDir);
         if (checkDir.isEmpty()) break;
+        const char* homeEnv = ::getenv("HOME");
+        String homeDir = homeEnv ? String(homeEnv) : "/home/xi";
+        if (checkDir == homeDir || checkDir == homeDir + "/Repo" || checkDir == "/home" || checkDir == "/") {
+            break;
+        }
         
         Array<String>* cached = getWildcardCache().get(checkDir);
         if (cached) {
@@ -670,10 +675,9 @@ String CppPreprocessor::resolveIncludePath(const String& specifier, const String
             candidate += "/";
         }
         candidate += specifier;
-        candidate = canonicalizePath(candidate);
         struct stat st;
         if (::stat(candidate.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
-            return candidate;
+            return canonicalizePath(candidate);
         }
     }
     return "";
