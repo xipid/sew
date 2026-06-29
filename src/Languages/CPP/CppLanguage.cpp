@@ -333,6 +333,9 @@ static inline bool isSpace(char c) {
 }
 
 static inline bool matchesAtIndex(const String& source, usz index, const String& target) {
+    // Safety guard: An empty string should never match anything
+    if (target.isEmpty() || target.length() == 0) return false; 
+    
     if (index + target.length() > source.length()) return false;
     return memcmp(source.data() + index, target.data(), target.length()) == 0;
 }
@@ -406,6 +409,7 @@ static Array<DetectedVar> detectGlobalVars(const String& source, const Array<Par
         if (braceDepth == 0) {
             for (usz ci = 0; ci < classes.size(); ++ci) {
                 const String& className = classes[ci].name;
+                if (className.isEmpty() || className.length() == 0) continue; // <-- ADD THIS LINE
                 if (className.indexOf('<') >= 0) continue;
                 
                 if (matchesAtIndex(source, i, className)) {
@@ -552,48 +556,67 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
             continue;
         }
         
-        // 1. Check for Casts
+        // 1. Zero-allocation check for Casts
         bool castMatched = false;
         for (usz ci = 0; ci < classes.size(); ++ci) {
             const String& className = classes[ci].name;
+            if (className.isEmpty() || className.length() == 0) continue;
             if (className.indexOf('<') >= 0) continue;
             
-            String sc = "static_cast<" + className + "*>";
-            String rc = "reinterpret_cast<" + className + "*>";
-            String cc = "const_cast<" + className + "*>";
-            
-            if (matchesAtIndex(source, i, sc)) {
-                rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
-                i += sc.length();
-                castMatched = true;
-                break;
-            }
-            if (matchesAtIndex(source, i, rc)) {
-                rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
-                i += rc.length();
-                castMatched = true;
-                break;
-            }
-            if (matchesAtIndex(source, i, cc)) {
-                rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
-                i += cc.length();
-                castMatched = true;
-                break;
+            // Check static_cast<className*>
+            if (matchesAtIndex(source, i, "static_cast<")) {
+                usz classStart = i + 12; // length of "static_cast<"
+                if (matchesAtIndex(source, classStart, className) && 
+                    matchesAtIndex(source, classStart + className.length(), "*>")) {
+                    rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
+                    i += 12 + className.length() + 2;
+                    castMatched = true;
+                    break;
+                }
             }
             
-            String cstyle = "(" + className + "*)(";
-            if (matchesAtIndex(source, i, cstyle)) {
-                rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>(";
-                i += cstyle.length();
-                castMatched = true;
-                break;
+            // Check reinterpret_cast<className*>
+            if (matchesAtIndex(source, i, "reinterpret_cast<")) {
+                usz classStart = i + 17; // length of "reinterpret_cast<"
+                if (matchesAtIndex(source, classStart, className) && 
+                    matchesAtIndex(source, classStart + className.length(), "*>")) {
+                    rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
+                    i += 17 + className.length() + 2;
+                    castMatched = true;
+                    break;
+                }
             }
-            String cstyle_space = "(" + className + " *)(";
-            if (matchesAtIndex(source, i, cstyle_space)) {
-                rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>(";
-                i += cstyle_space.length();
-                castMatched = true;
-                break;
+            
+            // Check const_cast<className*>
+            if (matchesAtIndex(source, i, "const_cast<")) {
+                usz classStart = i + 11; // length of "const_cast<"
+                if (matchesAtIndex(source, classStart, className) && 
+                    matchesAtIndex(source, classStart + className.length(), "*>")) {
+                    rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>";
+                    i += 11 + className.length() + 2;
+                    castMatched = true;
+                    break;
+                }
+            }
+            
+            // Check C-style casts (className*)( or (className *)(
+            if (c == '(') {
+                usz classStart = i + 1;
+                if (matchesAtIndex(source, classStart, className)) {
+                    usz suffixStart = classStart + className.length();
+                    if (matchesAtIndex(source, suffixStart, "*)(")) {
+                        rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>(";
+                        i += 1 + className.length() + 3;
+                        castMatched = true;
+                        break;
+                    }
+                    if (matchesAtIndex(source, suffixStart, " *)(")) {
+                        rewritten += "Sew::Reflect::ReflectionRegistry::resolveCast<" + className + "*>(";
+                        i += 1 + className.length() + 4;
+                        castMatched = true;
+                        break;
+                    }
+                }
             }
         }
         if (castMatched) continue;
@@ -604,6 +627,7 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
             const auto& var = globalVars[vi];
             const String& name = var.name;
             const String& type = var.type;
+            if (name.isEmpty() || name.length() == 0) continue;
             
             if (matchesAtIndex(source, i, name)) {
                 bool boundaryBefore = (i == 0 || !isAlnum(source[i - 1]) && source[i - 1] != '_');
@@ -611,6 +635,12 @@ static String rewriteCastsAndIdentifiers(const String& source, const Array<Parse
                 bool boundaryAfter = (nextPos >= source.length() || !isAlnum(source[nextPos]) && source[nextPos] != '_');
                 
                 if (boundaryBefore && boundaryAfter) {
+                     if (name.length() == 0) {
+                        ::printf("\n[ERROR] Infinite loop prevented! Empty variable name of type '%s' matched.\n", type.c_str());
+                        ::fflush(stdout);
+                        ::exit(1);
+                    }
+
                     bool isDeclaration = false;
                     if (braceDepth > 0) {
                         long long prev = (long long)i - 1;
@@ -948,17 +978,26 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
     for (usz i = 0; i < searchPaths.size(); ++i) {
         modReq.includePaths.push(searchPaths[i]);
     }
+    
+    // Safe temporary array to collect extra paths without modifying req.includePaths in-place
+    Array<String> extraPaths;
     for (usz i = 0; i < req.includePaths.size(); ++i) {
         if (req.includePaths[i].includes("/xic/")) {
             long long idx = req.includePaths[i].indexOf("/xic/");
             if (idx >= 0) {
                 String xicRoot = req.includePaths[i].substring(0, (usz)idx + 4);
                 String dilRoot = xicRoot + "/deps/diligent";
-                modReq.includePaths.push(dilRoot);
-                modReq.includePaths.push(dilRoot + "/Platforms/interface");
+                extraPaths.push(dilRoot);
+                extraPaths.push(dilRoot + "/Platforms/interface");
             }
         }
     }
+    
+    // Safely append the collected paths
+    for (usz i = 0; i < extraPaths.size(); ++i) {
+        modReq.includePaths.push(extraPaths[i]);
+    }
+    
     return invokeClang(modReq, ppResult.strippedSource);
   }
 
@@ -967,8 +1006,8 @@ CompileResult CppLanguage::compile(const CompileRequest &req) {
       std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
       classesCopy = g_allParsedClasses;
   }
-  ::printf("Compiling %s: classesCopy size is %d\n", req.sourcePath.c_str(), (int)classesCopy.size());
-  ::fflush(stdout);
+//   ::printf("Compiling %s: classesCopy size is %d\n", req.sourcePath.c_str(), (int)classesCopy.size());
+//   ::fflush(stdout);
   String rewritten = rewriteCppSource(req.sourceContent, classesCopy);
 
   String safePath = req.sourcePath;

@@ -18,9 +18,141 @@
 #include <vector>
 #include <algorithm>
 
+#include <cstdint> // Ensure standard integer types are included
+
+// --- High-Performance Binary String Helpers ---
+
+
 namespace Sew {
 
-static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Map<usz, bool>& visited);
+
+
+static String readBinaryString(FILE* f, char* buffer, size_t bufferSize) {
+    uint32_t len = 0;
+    if (::fread(&len, sizeof(len), 1, f) != 1) return "";
+    if (len == 0) return "";
+    
+    if (len < bufferSize) {
+        if (::fread(buffer, 1, len, f) != len) return "";
+        buffer[len] = '\0';
+        return String(buffer);
+    } else {
+        char* heapBuf = new char[len + 1];
+        if (::fread(heapBuf, 1, len, f) != len) {
+            delete[] heapBuf;
+            return "";
+        }
+        heapBuf[len] = '\0';
+        String res(heapBuf);
+        delete[] heapBuf;
+        return res;
+    }
+}
+
+static void writeBinaryString(FILE* f, const String& str) {
+    uint32_t len = (uint32_t)str.length();
+    ::fwrite(&len, sizeof(len), 1, f);
+    if (len > 0) {
+        ::fwrite(str.c_str(), 1, len, f);
+    }
+}
+
+// --- Binary Database Implementation ---
+
+void Engine::loadDepDb() {
+    _cachedFiles.clear();
+    const char* home = ::getenv("HOME");
+    if (!home) home = "/tmp";
+    String dbPath = String(home) + "/.cache/sew/dep_db.bin"; // Changed from .txt to .bin
+    
+    FILE* f = fopen(dbPath.c_str(), "rb"); // Open in binary read mode
+    if (!f) return;
+    
+    // Validate Magic Number & Version
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    if (::fread(&magic, sizeof(magic), 1, f) != 1 || magic != 0x53455744 || // "SEWD" in hex
+        ::fread(&version, sizeof(version), 1, f) != 1 || version != 1) {
+        fclose(f);
+        return; // Invalid or outdated database format
+    }
+    
+    uint32_t entryCount = 0;
+    if (::fread(&entryCount, sizeof(entryCount), 1, f) != 1) {
+        fclose(f);
+        return;
+    }
+    
+    char stackBuffer[4096]; // Stack buffer to avoid heap allocations during read
+    
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        CachedFileEntry entry;
+        entry.language = readBinaryString(f, stackBuffer, sizeof(stackBuffer));
+        
+        if (::fread(&entry.mtime, sizeof(entry.mtime), 1, f) != 1 ||
+            ::fread(&entry.size, sizeof(entry.size), 1, f) != 1) {
+            break;
+        }
+        
+        entry.contentHash = readBinaryString(f, stackBuffer, sizeof(stackBuffer));
+        entry.path = readBinaryString(f, stackBuffer, sizeof(stackBuffer));
+        
+        uint32_t importCount = 0;
+        if (::fread(&importCount, sizeof(importCount), 1, f) != 1) {
+            break;
+        }
+        
+        for (uint32_t j = 0; j < importCount; ++j) {
+            entry.resolvedImports.push(readBinaryString(f, stackBuffer, sizeof(stackBuffer)));
+        }
+        
+        _cachedFiles.set(entry.path, entry);
+    }
+    
+    fclose(f);
+}
+
+void Engine::saveDepDb() {
+    const char* home = ::getenv("HOME");
+    if (!home) home = "/tmp";
+    String dbDir = String(home) + "/.cache/sew";
+    ::mkdir(dbDir.c_str(), 0755);
+    String dbPath = dbDir + "/dep_db.bin"; // Changed from .txt to .bin
+    
+    FILE* f = fopen(dbPath.c_str(), "wb"); // Open in binary write mode
+    if (!f) return;
+    
+    // Write Header: Magic Number ("SEWD") + Version (1)
+    uint32_t magic = 0x53455744;
+    uint32_t version = 1;
+    ::fwrite(&magic, sizeof(magic), 1, f);
+    ::fwrite(&version, sizeof(version), 1, f);
+    
+    uint32_t entryCount = (uint32_t)_cachedFiles.size();
+    ::fwrite(&entryCount, sizeof(entryCount), 1, f);
+    
+    for (auto& kv : _cachedFiles) {
+        CachedFileEntry& entry = kv.value;
+        
+        writeBinaryString(f, entry.language);
+        ::fwrite(&entry.mtime, sizeof(entry.mtime), 1, f);
+        ::fwrite(&entry.size, sizeof(entry.size), 1, f);
+        writeBinaryString(f, entry.contentHash);
+        writeBinaryString(f, entry.path);
+        
+        uint32_t importCount = (uint32_t)entry.resolvedImports.size();
+        ::fwrite(&importCount, sizeof(importCount), 1, f);
+        
+        for (usz j = 0; j < entry.resolvedImports.size(); ++j) {
+            writeBinaryString(f, entry.resolvedImports[j]);
+        }
+    }
+    
+    fclose(f);
+}
+
+
+static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Array<bool>& visited);
 
 static String canonicalize(const String& path) {
     char* rp = ::realpath(path.c_str(), nullptr);
@@ -340,6 +472,7 @@ void Engine::discoverFile(const String& rawPath) {
         }
 
         for (usz i = 0; i < imports.size(); ++i) {
+            if (imports[i].isSystem) continue;
             String resolved = resolveImport(imports[i], path);
             if (!resolved.isEmpty()) resolved = canonicalize(resolved);
 
@@ -468,6 +601,7 @@ void Engine::find(const String& targetName) {
                 _inputs[i].content, path);
 
             for (usz j = 0; j < imports.size(); ++j) {
+                if (imports[j].isSystem) continue;
                 String resolved = resolveImport(imports[j], path);
 
                 if (detectLanguage(resolved).isEmpty()) {
@@ -564,11 +698,22 @@ void Engine::find(const String& targetName) {
 
     {
         std::lock_guard<std::mutex> lock(g_parsedClassesMutex);
-        g_allParsedClasses = parser.classes;
+        Array<ParsedClass> uniqueClasses;
+        Map<String, bool> seenClassNames;
+        for (usz i = 0; i < parser.classes.size(); ++i) {
+            const String& className = parser.classes[i].name;
+            if (className.isEmpty() || className.length() == 0) continue;
+            
+            if (!seenClassNames.has(className)) {
+                seenClassNames.set(className, true);
+                uniqueClasses.push(parser.classes[i]);
+            }
+        }
+        g_allParsedClasses = uniqueClasses;
     }
 
     if (parser.classes.size() > 0 || parser.functions.size() > 0) {
-        // Generate C++ bridge
+    // Generate C++ bridge
         String bridgeCode = BindingGenerator::generateCppBridge(parser.classes, parser.functions, parser.namespaces, headerPathsForParse);
 
         // Add to graph
@@ -917,7 +1062,8 @@ bool Engine::build(const String& targetName) {
                                 // Check cache
                                 bool isPic = outputPath.endsWith(".so");
                                 Array<String> depHashes;
-                                Map<usz, bool> visited;
+                                Array<bool> visited;
+                                visited.allocate(_graph.nodes.size());
                                 for (usz i = 0; i < node.dependencies.size(); ++i) {
                                     collectDepHashesRecursive(_graph, node.dependencies[i], depHashes, visited);
                                 }
@@ -1218,13 +1364,25 @@ void Engine::stopCompileWorkers() {
     }
 }
 
-static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Map<usz, bool>& visited) {
-    if (visited.has(nodeIdx)) return;
-    visited.set(nodeIdx, true);
+// static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Map<usz, bool>& visited) {
+//     if (visited.has(nodeIdx)) return;
+//     visited.set(nodeIdx, true);
+//     const auto& node = graph.nodes[nodeIdx];
+//     for (usz i = 0; i < node.dependencies.size(); ++i) {
+//         collectDepHashesRecursive(graph, node.dependencies[i], hashes, visited);
+//     }
+//     hashes.push(node.contentHash);
+// }
+
+static void collectDepHashesRecursive(const DepGraph& graph, usz nodeIdx, Array<String>& hashes, Array<bool>& visited) {
+    if (nodeIdx >= graph.nodes.size() || visited[nodeIdx]) return;
+    visited[nodeIdx] = true;
+    
     const auto& node = graph.nodes[nodeIdx];
     for (usz i = 0; i < node.dependencies.size(); ++i) {
         collectDepHashesRecursive(graph, node.dependencies[i], hashes, visited);
     }
+
     hashes.push(node.contentHash);
 }
 
@@ -1330,7 +1488,8 @@ void Engine::queueCompile(usz nodeIdx, Target* target, const String& targetName)
     req.outputPath = outPath;
     
     Array<String> depHashes;
-    Map<usz, bool> visited;
+    Array<bool> visited;
+    visited.allocate(_graph.nodes.size());
     for (usz i = 0; i < node.dependencies.size(); ++i) {
         collectDepHashesRecursive(_graph, node.dependencies[i], depHashes, visited);
     }
@@ -1344,79 +1503,79 @@ void Engine::queueCompile(usz nodeIdx, Target* target, const String& targetName)
     _compileCv.notify_one();
 }
 
-void Engine::loadDepDb() {
-    _cachedFiles.clear();
-    const char* home = ::getenv("HOME");
-    if (!home) home = "/tmp";
-    String dbPath = String(home) + "/.cache/sew/dep_db.txt";
+// void Engine::loadDepDb() {
+//     _cachedFiles.clear();
+//     const char* home = ::getenv("HOME");
+//     if (!home) home = "/tmp";
+//     String dbPath = String(home) + "/.cache/sew/dep_db.txt";
     
-    FILE* f = fopen(dbPath.c_str(), "r");
-    if (!f) return;
+//     FILE* f = fopen(dbPath.c_str(), "r");
+//     if (!f) return;
     
-    char line[4096];
-    CachedFileEntry current;
-    bool hasCurrent = false;
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[len - 1] = '\0';
-            len--;
-        }
-        if (len == 0) continue;
+//     char line[4096];
+//     CachedFileEntry current;
+//     bool hasCurrent = false;
+//     while (fgets(line, sizeof(line), f)) {
+//         size_t len = strlen(line);
+//         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+//             line[len - 1] = '\0';
+//             len--;
+//         }
+//         if (len == 0) continue;
         
-        if (line[0] == 'F' && line[1] == ' ') {
-            if (hasCurrent) {
-                _cachedFiles.set(current.path, current);
-            }
-            current = CachedFileEntry();
-            char langBuf[64] = {0};
-            long long mtime = 0;
-            long long size = 0;
-            char hashBuf[128] = {0};
-            char pathBuf[2048] = {0};
-            if (sscanf(line, "F %63s %lld %lld %127s %[^\n]", langBuf, &mtime, &size, hashBuf, pathBuf) >= 5) {
-                current.language = langBuf;
-                current.mtime = mtime;
-                current.size = size;
-                current.contentHash = hashBuf;
-                current.path = pathBuf;
-                hasCurrent = true;
-            } else {
-                hasCurrent = false;
-            }
-        } else if (line[0] == 'I' && line[1] == ' ' && hasCurrent) {
-            current.resolvedImports.push(line + 2);
-        }
-    }
-    if (hasCurrent) {
-        _cachedFiles.set(current.path, current);
-    }
-    fclose(f);
-}
+//         if (line[0] == 'F' && line[1] == ' ') {
+//             if (hasCurrent) {
+//                 _cachedFiles.set(current.path, current);
+//             }
+//             current = CachedFileEntry();
+//             char langBuf[64] = {0};
+//             long long mtime = 0;
+//             long long size = 0;
+//             char hashBuf[128] = {0};
+//             char pathBuf[2048] = {0};
+//             if (sscanf(line, "F %63s %lld %lld %127s %[^\n]", langBuf, &mtime, &size, hashBuf, pathBuf) >= 5) {
+//                 current.language = langBuf;
+//                 current.mtime = mtime;
+//                 current.size = size;
+//                 current.contentHash = hashBuf;
+//                 current.path = pathBuf;
+//                 hasCurrent = true;
+//             } else {
+//                 hasCurrent = false;
+//             }
+//         } else if (line[0] == 'I' && line[1] == ' ' && hasCurrent) {
+//             current.resolvedImports.push(line + 2);
+//         }
+//     }
+//     if (hasCurrent) {
+//         _cachedFiles.set(current.path, current);
+//     }
+//     fclose(f);
+// }
 
-void Engine::saveDepDb() {
-    const char* home = ::getenv("HOME");
-    if (!home) home = "/tmp";
-    String dbDir = String(home) + "/.cache/sew";
-    ::mkdir(dbDir.c_str(), 0755);
-    String dbPath = dbDir + "/dep_db.txt";
+// void Engine::saveDepDb() {
+//     const char* home = ::getenv("HOME");
+//     if (!home) home = "/tmp";
+//     String dbDir = String(home) + "/.cache/sew";
+//     ::mkdir(dbDir.c_str(), 0755);
+//     String dbPath = dbDir + "/dep_db.txt";
     
-    FILE* f = fopen(dbPath.c_str(), "w");
-    if (!f) return;
+//     FILE* f = fopen(dbPath.c_str(), "w");
+//     if (!f) return;
     
-    for (auto& kv : _cachedFiles) {
-        CachedFileEntry& entry = kv.value;
-        fprintf(f, "F %s %lld %lld %s %s\n",
-                entry.language.c_str(),
-                entry.mtime,
-                entry.size,
-                entry.contentHash.c_str(),
-                entry.path.c_str());
-        for (usz j = 0; j < entry.resolvedImports.size(); ++j) {
-            fprintf(f, "I %s\n", entry.resolvedImports[j].c_str());
-        }
-    }
-    fclose(f);
-}
+//     for (auto& kv : _cachedFiles) {
+//         CachedFileEntry& entry = kv.value;
+//         fprintf(f, "F %s %lld %lld %s %s\n",
+//                 entry.language.c_str(),
+//                 entry.mtime,
+//                 entry.size,
+//                 entry.contentHash.c_str(),
+//                 entry.path.c_str());
+//         for (usz j = 0; j < entry.resolvedImports.size(); ++j) {
+//             fprintf(f, "I %s\n", entry.resolvedImports[j].c_str());
+//         }
+//     }
+//     fclose(f);
+// }
 
 } // namespace Sew
